@@ -65,7 +65,7 @@ class SohInputEditorWindow final : public Ship::GuiWindow {
     void addButtonName(N64ButtonMask mask, const char* name);
     void DrawMapping(CustomButtonMap& mapping, float labelWidth, N64ButtonMask excludedButtons);
     void DrawOcarinaControlPanel();
-    void DrawCameraControlPanel();
+    void DrawCameraControlPanel(uint8_t portIndex);
     void DrawDpadControlPanel();
 
     int32_t mGameInputBlockTimer;
@@ -87,8 +87,8 @@ class SohInputEditorWindow final : public Ship::GuiWindow {
     void GetButtonColorsForDeviceType(Ship::PhysicalDeviceType lusIndex, ImVec4& buttonColor,
                                       ImVec4& buttonHoveredColor);
     void DrawLinkTab();
-    void DrawIvanTab();
-    void DrawDebugPortTab(uint8_t portIndex, std::string customName = "");
+    void DrawMultiplayerTabs();
+    void DrawPlayerPortTab(uint8_t portIndex, std::string customName = "");
     std::set<N64ButtonMask> mButtonsBitmasks;
     std::set<N64ButtonMask> mDpadBitmasks;
     std::set<N64ButtonMask> mModifierButtonsBitmasks;

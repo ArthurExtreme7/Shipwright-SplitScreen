@@ -333,6 +333,71 @@ void EnItem00_SetupAction(EnItem00* this, EnItem00ActionFunc actionFunc) {
     this->actionFunc = actionFunc;
 }
 
+static Player* EnItem00_FindClosestPlayer(PlayState* play, Vec3f* pos, f32* distSqOut) {
+    Actor* actor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    Player* closest = NULL;
+    f32 minDistSq = 1.0e20f;
+
+    while (actor != NULL) {
+        if (actor->id == ACTOR_PLAYER) {
+            f32 dx = pos->x - actor->world.pos.x;
+            f32 dy = pos->y - actor->world.pos.y;
+            f32 dz = pos->z - actor->world.pos.z;
+            f32 distSq = dx * dx + dz * dz;
+
+            if ((dy >= -50.0f) && (dy <= 50.0f) && (distSq < minDistSq)) {
+                closest = (Player*)actor;
+                minDistSq = distSq;
+            }
+        }
+
+        actor = actor->next;
+    }
+
+    if (distSqOut != NULL) {
+        *distSqOut = minDistSq;
+    }
+
+    if (closest != NULL) {
+        return closest;
+    }
+
+    return GET_PLAYER(play);
+}
+
+static Player* EnItem00_GetPickupPlayer(PlayState* play, EnItem00* this, Player* closestPlayer) {
+    if ((this->actor.parent != NULL) && (this->actor.parent->id == ACTOR_PLAYER)) {
+        return (Player*)this->actor.parent;
+    }
+
+    if (closestPlayer != NULL) {
+        return closestPlayer;
+    }
+
+    return GET_PLAYER(play);
+}
+
+static void EnItem00_GiveItemToPlayer(PlayState* play, Player* player, u8 itemId) {
+    if (player == NULL) {
+        player = GET_PLAYER(play);
+    }
+
+    Item_Give_SetPlayer(player);
+    Item_Give(play, itemId);
+    Item_Give_ClearPlayer();
+}
+
+static void EnItem00_GiveGetItemToPlayer(PlayState* play, Player* player, s32 getItemId) {
+    GetItemEntry giEntry;
+
+    if (getItemId == GI_NONE) {
+        return;
+    }
+
+    giEntry = ItemTable_Retrieve(getItemId);
+    EnItem00_GiveItemToPlayer(play, player, giEntry.itemId);
+}
+
 void EnItem00_SetObjectDependency(EnItem00* this, PlayState* play, s16 objectIndex) {
     // Remove object dependency for Enemy Randomizer and Crowd Control to allow Like-likes to
     // drop equipment correctly in rooms where Like-likes normally don't spawn.
@@ -351,6 +416,7 @@ void EnItem00_Init(Actor* thisx, PlayState* play) {
     f32 yOffset = 980.0f;
     f32 shadowScale = 6.0f;
     s32 getItemId = GI_NONE;
+    Player* pickupPlayer = GET_PLAYER(play);
     this->randoCheck = (RandomizerCheck)RC_UNKNOWN_CHECK;
     this->itemEntry = (GetItemEntry)GET_ITEM_NONE;
     s16 spawnParam8000 = this->actor.params & 0x8000;
@@ -511,6 +577,12 @@ void EnItem00_Init(Actor* thisx, PlayState* play) {
         return;
     }
 
+    pickupPlayer = EnItem00_FindClosestPlayer(play, &this->actor.world.pos, NULL);
+    if ((pickupPlayer != NULL) && (pickupPlayer != GET_PLAYER(play))) {
+        this->actor.parent = &pickupPlayer->actor;
+        pickupPlayer->interactRangeActor = &this->actor;
+    }
+
     switch (this->actor.params) {
         case ITEM00_RUPEE_GREEN:
             Item_Give(play, ITEM_RUPEE_GREEN);
@@ -528,26 +600,26 @@ void EnItem00_Init(Actor* thisx, PlayState* play) {
             Item_Give(play, ITEM_RUPEE_GOLD);
             break;
         case ITEM00_HEART:
-            Item_Give(play, ITEM_HEART);
+            Health_ChangeBy(play, 0x10, pickupPlayer);
             break;
         case ITEM00_FLEXIBLE:
-            Health_ChangeBy(play, 0x70);
+            Health_ChangeBy(play, 0x70, pickupPlayer);
             break;
         case ITEM00_BOMBS_A:
         case ITEM00_BOMBS_B:
-            Item_Give(play, ITEM_BOMBS_5);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_BOMBS_5);
             break;
         case ITEM00_ARROWS_SINGLE:
-            Item_Give(play, ITEM_BOW);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_BOW);
             break;
         case ITEM00_ARROWS_SMALL:
-            Item_Give(play, ITEM_ARROWS_SMALL);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_ARROWS_SMALL);
             break;
         case ITEM00_ARROWS_MEDIUM:
-            Item_Give(play, ITEM_ARROWS_MEDIUM);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_ARROWS_MEDIUM);
             break;
         case ITEM00_ARROWS_LARGE:
-            Item_Give(play, ITEM_ARROWS_LARGE);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_ARROWS_LARGE);
             break;
         case ITEM00_MAGIC_LARGE:
             getItemId = GI_MAGIC_SMALL;
@@ -556,7 +628,7 @@ void EnItem00_Init(Actor* thisx, PlayState* play) {
             getItemId = GI_MAGIC_LARGE;
             break;
         case ITEM00_SMALL_KEY:
-            Item_Give(play, ITEM_KEY_SMALL);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_KEY_SMALL);
             break;
         case ITEM00_SEEDS:
             getItemId = GI_SEEDS_5;
@@ -576,8 +648,13 @@ void EnItem00_Init(Actor* thisx, PlayState* play) {
         case ITEM00_BOMBS_SPECIAL:
             break;
         case ITEM00_BOMBCHU:
-            Item_Give(play, ITEM_BOMBCHUS_5);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_BOMBCHUS_5);
             break;
+    }
+
+    if ((getItemId != GI_NONE) && (pickupPlayer != GET_PLAYER(play))) {
+        EnItem00_GiveGetItemToPlayer(play, pickupPlayer, getItemId);
+        getItemId = GI_NONE;
     }
 
     if ((getItemId != GI_NONE) && !Actor_HasParent(&this->actor, play)) {
@@ -723,7 +800,14 @@ void func_8001E304(EnItem00* this, PlayState* play) {
 }
 
 void func_8001E5C8(EnItem00* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player;
+
+    if ((this->actor.parent != NULL) && (this->actor.parent->id == ACTOR_PLAYER)) {
+        player = (Player*)this->actor.parent;
+    } else {
+        player = GET_PLAYER(play);
+    }
+
     if (this->getItemId != GI_NONE) {
         if (!Actor_HasParent(&this->actor, play)) {
             Actor_OfferGetItem(&this->actor, play, this->getItemId, 50.0f, 80.0f);
@@ -760,6 +844,9 @@ void EnItem00_Update(Actor* thisx, PlayState* play) {
     static s16 D_80157D94[1];
     s16* params;
     Actor* dynaActor;
+    Player* closestPlayer;
+    Player* pickupPlayer;
+    f32 minDistSq;
     s32 getItemId = GI_NONE;
     s16 sp3A = 0;
     s16 i;
@@ -847,12 +934,21 @@ void EnItem00_Update(Actor* thisx, PlayState* play) {
         return;
     }
 
-    if (!((this->actor.xzDistToPlayer <= 30.0f) && (this->actor.yDistToPlayer >= -50.0f) &&
-          (this->actor.yDistToPlayer <= 50.0f))) {
+    closestPlayer = EnItem00_FindClosestPlayer(play, &this->actor.world.pos, &minDistSq);
+    if (minDistSq > 900.0f) {
+        closestPlayer = NULL;
+    }
+
+    if (closestPlayer == NULL) {
         if (!Actor_HasParent(&this->actor, play)) {
             return;
         }
+    } else if (!Actor_HasParent(&this->actor, play) && (closestPlayer != GET_PLAYER(play))) {
+        this->actor.parent = &closestPlayer->actor;
+        closestPlayer->interactRangeActor = &this->actor;
     }
+
+    pickupPlayer = EnItem00_GetPickupPlayer(play, this, closestPlayer);
 
     if (play->gameOverCtx.state != GAMEOVER_INACTIVE) {
         return;
@@ -885,26 +981,26 @@ void EnItem00_Update(Actor* thisx, PlayState* play) {
             getItemId = GI_NUTS_5;
             break;
         case ITEM00_HEART:
-            Item_Give(play, ITEM_HEART);
+            Health_ChangeBy(play, 0x10, pickupPlayer);
             break;
         case ITEM00_FLEXIBLE:
-            Health_ChangeBy(play, 0x70);
+            Health_ChangeBy(play, 0x70, pickupPlayer);
             break;
         case ITEM00_BOMBS_A:
         case ITEM00_BOMBS_B:
-            Item_Give(play, ITEM_BOMBS_5);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_BOMBS_5);
             break;
         case ITEM00_ARROWS_SINGLE:
-            Item_Give(play, ITEM_BOW);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_BOW);
             break;
         case ITEM00_ARROWS_SMALL:
-            Item_Give(play, ITEM_ARROWS_SMALL);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_ARROWS_SMALL);
             break;
         case ITEM00_ARROWS_MEDIUM:
-            Item_Give(play, ITEM_ARROWS_MEDIUM);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_ARROWS_MEDIUM);
             break;
         case ITEM00_ARROWS_LARGE:
-            Item_Give(play, ITEM_ARROWS_LARGE);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_ARROWS_LARGE);
             break;
         case ITEM00_SEEDS:
             getItemId = GI_SEEDS_5;
@@ -939,8 +1035,13 @@ void EnItem00_Update(Actor* thisx, PlayState* play) {
         case ITEM00_BOMBS_SPECIAL:
             break;
         case ITEM00_BOMBCHU:
-            Item_Give(play, ITEM_BOMBCHUS_5);
+            EnItem00_GiveItemToPlayer(play, pickupPlayer, ITEM_BOMBCHUS_5);
             break;
+    }
+
+    if ((getItemId != GI_NONE) && (pickupPlayer != GET_PLAYER(play))) {
+        EnItem00_GiveGetItemToPlayer(play, pickupPlayer, getItemId);
+        getItemId = GI_NONE;
     }
 
     params = &this->actor.params;

@@ -46,10 +46,10 @@ void GameInteractor::RawAction::AddOrRemoveMagic(int8_t amount) {
 
 void GameInteractor::RawAction::HealOrDamagePlayer(int16_t hearts) {
     if (hearts > 0) {
-        Health_ChangeBy(gPlayState, hearts * FULL_HEART_HEALTH);
+        Health_ChangeBy(gPlayState, hearts * FULL_HEART_HEALTH, GET_PLAYER(gPlayState));
     } else if (hearts < 0) {
         Player* player = GET_PLAYER(gPlayState);
-        Health_ChangeBy(gPlayState, hearts * FULL_HEART_HEALTH);
+        Health_ChangeBy(gPlayState, hearts * FULL_HEART_HEALTH, player);
         func_80837C0C(gPlayState, player, 0, 0, 0, 0, 0);
         player->invincibilityTimer = 28;
     }
@@ -131,29 +131,43 @@ void GameInteractor::RawAction::KnockbackPlayer(float strength) {
 void GameInteractor::RawAction::SetSceneFlag(int16_t sceneNum, int16_t flagType, int16_t flag) {
     switch (flagType) {
         case FlagType::FLAG_SCENE_SWITCH:
-            if (sceneNum == gPlayState->sceneNum) {
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 if (flag < 0x20) {
                     gPlayState->actorCtx.flags.swch |= (1 << flag);
                 } else {
                     gPlayState->actorCtx.flags.tempSwch |= (1 << (flag - 0x20));
                 }
             }
-            if (flag < 0x20) {
-                gSaveContext.sceneFlags[sceneNum].swch |= (1 << flag);
+            if (sceneNum >= 0 && sceneNum < 124) {
+                if (flag < 0x20) {
+                    gSaveContext.sceneFlags[sceneNum].swch |= (1 << flag);
+                }
+            } else {
+                LUSLOG_WARN("SetSceneFlag: invalid sceneNum %d", sceneNum);
             }
             break;
         case FlagType::FLAG_SCENE_CLEAR:
-            if (sceneNum == gPlayState->sceneNum)
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 gPlayState->actorCtx.flags.clear |= (1 << flag);
-            gSaveContext.sceneFlags[sceneNum].clear |= (1 << flag);
+            }
+            if (sceneNum >= 0 && sceneNum < 124) {
+                gSaveContext.sceneFlags[sceneNum].clear |= (1 << flag);
+            } else {
+                LUSLOG_WARN("SetSceneFlag: invalid sceneNum %d", sceneNum);
+            }
             break;
         case FlagType::FLAG_SCENE_TREASURE:
-            if (sceneNum == gPlayState->sceneNum)
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 gPlayState->actorCtx.flags.chest |= (1 << flag);
-            gSaveContext.sceneFlags[sceneNum].chest |= (1 << flag);
+            }
+            if (sceneNum >= 0 && sceneNum < 124) {
+                gSaveContext.sceneFlags[sceneNum].chest |= (1 << flag);
+            } else {
+                LUSLOG_WARN("SetSceneFlag: invalid sceneNum %d", sceneNum);
+            }
             break;
         case FlagType::FLAG_SCENE_COLLECTIBLE:
-            if (sceneNum == gPlayState->sceneNum) {
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 if (flag != 0) {
                     if (flag < 0x20) {
                         gPlayState->actorCtx.flags.collect |= (1 << flag);
@@ -162,8 +176,12 @@ void GameInteractor::RawAction::SetSceneFlag(int16_t sceneNum, int16_t flagType,
                     }
                 }
             }
-            if (flag != 0 && flag < 0x20) {
-                gSaveContext.sceneFlags[sceneNum].collect |= (1 << flag);
+            if (sceneNum >= 0 && sceneNum < 124) {
+                if (flag != 0 && flag < 0x20) {
+                    gSaveContext.sceneFlags[sceneNum].collect |= (1 << flag);
+                }
+            } else {
+                LUSLOG_WARN("SetSceneFlag: invalid sceneNum %d", sceneNum);
             }
             break;
     }
@@ -172,29 +190,43 @@ void GameInteractor::RawAction::SetSceneFlag(int16_t sceneNum, int16_t flagType,
 void GameInteractor::RawAction::UnsetSceneFlag(int16_t sceneNum, int16_t flagType, int16_t flag) {
     switch (flagType) {
         case FlagType::FLAG_SCENE_SWITCH:
-            if (sceneNum == gPlayState->sceneNum) {
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 if (flag < 0x20) {
                     gPlayState->actorCtx.flags.swch &= ~(1 << flag);
                 } else {
                     gPlayState->actorCtx.flags.tempSwch &= ~(1 << (flag - 0x20));
                 }
             }
-            if (flag < 0x20) {
-                gSaveContext.sceneFlags[sceneNum].swch &= ~(1 << flag);
+            if (sceneNum >= 0 && sceneNum < 124) {
+                if (flag < 0x20) {
+                    gSaveContext.sceneFlags[sceneNum].swch &= ~(1 << flag);
+                }
+            } else {
+                LUSLOG_WARN("UnsetSceneFlag: invalid sceneNum %d", sceneNum);
             }
             break;
         case FlagType::FLAG_SCENE_CLEAR:
-            if (sceneNum == gPlayState->sceneNum)
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 gPlayState->actorCtx.flags.clear &= ~(1 << flag);
-            gSaveContext.sceneFlags[sceneNum].clear &= ~(1 << flag);
+            }
+            if (sceneNum >= 0 && sceneNum < 124) {
+                gSaveContext.sceneFlags[sceneNum].clear &= ~(1 << flag);
+            } else {
+                LUSLOG_WARN("UnsetSceneFlag: invalid sceneNum %d", sceneNum);
+            }
             break;
         case FlagType::FLAG_SCENE_TREASURE:
-            if (sceneNum == gPlayState->sceneNum)
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 gPlayState->actorCtx.flags.chest &= ~(1 << flag);
-            gSaveContext.sceneFlags[sceneNum].chest &= ~(1 << flag);
+            }
+            if (sceneNum >= 0 && sceneNum < 124) {
+                gSaveContext.sceneFlags[sceneNum].chest &= ~(1 << flag);
+            } else {
+                LUSLOG_WARN("UnsetSceneFlag: invalid sceneNum %d", sceneNum);
+            }
             break;
         case FlagType::FLAG_SCENE_COLLECTIBLE:
-            if (sceneNum == gPlayState->sceneNum) {
+            if (gPlayState != NULL && sceneNum == gPlayState->sceneNum && gPlayState->transitionType == 0) {
                 if (flag != 0) {
                     if (flag < 0x20) {
                         gPlayState->actorCtx.flags.collect &= ~(1 << flag);
@@ -203,8 +235,12 @@ void GameInteractor::RawAction::UnsetSceneFlag(int16_t sceneNum, int16_t flagTyp
                     }
                 }
             }
-            if (flag != 0 && flag < 0x20) {
-                gSaveContext.sceneFlags[sceneNum].collect &= ~(1 << flag);
+            if (sceneNum >= 0 && sceneNum < 124) {
+                if (flag != 0 && flag < 0x20) {
+                    gSaveContext.sceneFlags[sceneNum].collect &= ~(1 << flag);
+                }
+            } else {
+                LUSLOG_WARN("UnsetSceneFlag: invalid sceneNum %d", sceneNum);
             }
             break;
     }

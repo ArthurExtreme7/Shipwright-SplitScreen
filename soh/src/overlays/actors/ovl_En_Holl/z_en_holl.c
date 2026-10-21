@@ -2,6 +2,9 @@
 
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
+#define LOCAL_MP_DISABLED_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.Disable")
+#define LOCAL_MP_SECONDARY_AREA_LOAD_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas")
+
 // Horizontal Plane parameters
 
 #define PLANE_Y_MIN -50.0f
@@ -46,6 +49,82 @@ static InitChainEntry sInitChain[] = {
     ICHAIN_F32(uncullZoneDownward, 400, ICHAIN_STOP),
 };
 
+static s32 EnHoll_IsKokiriSetup8(void);
+
+static s32 EnHoll_SecondaryPlayersCanTrigger(PlayState* play) {
+    return !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) && CVarGetInteger(LOCAL_MP_SECONDARY_AREA_LOAD_CVAR, 0);
+}
+
+static Player* EnHoll_GetTriggerPlayer(PlayState* play, EnHoll* this) {
+    Player* mainPlayer = GET_PLAYER(play);
+    Player* bestPlayer;
+    Actor* actor;
+    s32 sanity = 0;
+    f32 dx;
+    f32 dy;
+    f32 dz;
+    f32 distSq;
+    f32 bestDistSq;
+
+    if (mainPlayer == NULL) {
+        return NULL;
+    }
+
+    // Preserve vanilla trigger authority for this special Kokiri setup.
+    // Secondary-player trigger selection can force unresolved room-load states here.
+    if (EnHoll_IsKokiriSetup8()) {
+        return mainPlayer;
+    }
+
+    if (!EnHoll_SecondaryPlayersCanTrigger(play)) {
+        return mainPlayer;
+    }
+
+    bestPlayer = mainPlayer;
+    dx = mainPlayer->actor.world.pos.x - this->actor.world.pos.x;
+    dy = mainPlayer->actor.world.pos.y - this->actor.world.pos.y;
+    dz = mainPlayer->actor.world.pos.z - this->actor.world.pos.z;
+    bestDistSq = SQ(dx) + SQ(dy) + SQ(dz);
+
+    actor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    while ((actor != NULL) && (sanity < 128)) {
+        if ((actor->id == ACTOR_PLAYER) && (actor->update != NULL)) {
+            Player* player = (Player*)actor;
+
+            dx = player->actor.world.pos.x - this->actor.world.pos.x;
+            dy = player->actor.world.pos.y - this->actor.world.pos.y;
+            dz = player->actor.world.pos.z - this->actor.world.pos.z;
+            distSq = SQ(dx) + SQ(dy) + SQ(dz);
+
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                bestPlayer = player;
+            }
+        }
+
+        actor = actor->next;
+        sanity++;
+    }
+
+    return bestPlayer;
+}
+
+static s32 EnHoll_ShouldSkipSecondaryRetainedSwap(PlayState* play, Player* player, s32 targetRoom) {
+    if ((play == NULL) || (player == NULL) || (targetRoom < 0)) {
+        return false;
+    }
+
+    if (!player->isSecondPlayer || !EnHoll_SecondaryPlayersCanTrigger(play)) {
+        return false;
+    }
+
+    if (player->actor.room != targetRoom) {
+        return false;
+    }
+
+    return OTRRoom_IsRetainedRoom(targetRoom);
+}
+
 /**
  * These are all absolute distances in the relative z direction. That is, moving
  *   towards or away from the "face" of the loading plane regardless of orientation.
@@ -76,7 +155,7 @@ void EnHoll_SetupAction(EnHoll* this, EnHollActionFunc func) {
     this->actionFunc = func;
 }
 
-s32 EnHoll_IsKokiriSetup8() {
+static s32 EnHoll_IsKokiriSetup8(void) {
     return gSaveContext.entranceIndex == ENTR_KOKIRI_FOREST_0 && gSaveContext.sceneSetupIndex == 8;
 }
 
@@ -119,11 +198,15 @@ void EnHoll_SwapRooms(PlayState* play) {
 
 // Horizontal Planes
 void func_80A58DD4(EnHoll* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = EnHoll_GetTriggerPlayer(play, this);
     s32 phi_t0 = ((play->sceneNum == SCENE_SPIRIT_TEMPLE) ? 1 : 0) & 0xFFFFFFFF;
     Vec3f vec;
     f32 absZ;
     s32 transitionActorIdx;
+
+    if (player == NULL) {
+        return;
+    }
 
     Actor_WorldToActorCoords(&this->actor, &vec, &player->actor.world.pos);
     this->side = (vec.z < 0.0f) ? 0 : 1;
@@ -134,19 +217,47 @@ void func_80A58DD4(EnHoll* this, PlayState* play) {
         if (absZ > sHorizTriggerDists[phi_t0][1]) {
             if (play->roomCtx.prevRoom.num >= 0 && play->roomCtx.status == 0) {
                 this->actor.room = play->transiActorCtx.list[transitionActorIdx].sides[this->side].room;
+
+                if (EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room)) {
+                    return;
+                }
+
                 EnHoll_SwapRooms(play);
                 func_80097534(play, &play->roomCtx);
+                if (this->actor.room >= 0) {
+                    player->actor.room = this->actor.room;
+                }
             }
         } else {
             this->actor.room = play->transiActorCtx.list[transitionActorIdx].sides[this->side ^ 1].room;
             if (play->roomCtx.prevRoom.num < 0) {
-                func_8009728C(play, &play->roomCtx, this->actor.room);
+                if (!EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room)) {
+                    func_8009728C(play, &play->roomCtx, this->actor.room);
+                }
             } else {
                 this->planeAlpha = (255.0f / (sHorizTriggerDists[phi_t0][2] - sHorizTriggerDists[phi_t0][3])) *
                                    (absZ - sHorizTriggerDists[phi_t0][3]);
                 this->planeAlpha = CLAMP(this->planeAlpha, 0, 255);
                 if (play->roomCtx.curRoom.num != this->actor.room) {
+                    s32 enteredRoom = play->roomCtx.curRoom.num;
+
+                    if (EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room)) {
+                        if (enteredRoom >= 0) {
+                            player->actor.room = enteredRoom;
+                        }
+                        return;
+                    }
+
                     EnHoll_SwapRooms(play);
+
+                    // Secondary-player-triggered area loads can otherwise swap room pointers
+                    // without committing room state, leaving interactables/floor effects stale.
+                    if (player->isSecondPlayer && (play->roomCtx.status == 0)) {
+                        func_80097534(play, &play->roomCtx);
+                    }
+                    if (enteredRoom >= 0) {
+                        player->actor.room = enteredRoom;
+                    }
                 }
             }
         }
@@ -155,12 +266,16 @@ void func_80A58DD4(EnHoll* this, PlayState* play) {
 
 // Horizontal Planes
 void func_80A59014(EnHoll* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = EnHoll_GetTriggerPlayer(play, this);
     s32 useViewEye = gDbgCamEnabled || play->csCtx.state != CS_STATE_IDLE;
     Vec3f vec;
     s32 temp;
     f32 planeHalfWidth;
     f32 absZ;
+
+    if ((player == NULL) && !useViewEye) {
+        return;
+    }
 
     Actor_WorldToActorCoords(&this->actor, &vec, (useViewEye) ? &play->view.eye : &player->actor.world.pos);
     planeHalfWidth = (((this->actor.params >> 6) & 7) == 6) ? PLANE_HALFWIDTH : PLANE_HALFWIDTH_2;
@@ -175,9 +290,13 @@ void func_80A59014(EnHoll* this, PlayState* play) {
 
         this->actor.room = room;
         if (temp) {}
-        if (this->actor.room != play->roomCtx.curRoom.num) {
+        if (!EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room) &&
+            (this->actor.room != play->roomCtx.curRoom.num)) {
             if (room) {}
             if (func_8009728C(play, &play->roomCtx, this->actor.room)) {
+                if ((player != NULL) && (this->actor.room >= 0)) {
+                    player->actor.room = this->actor.room;
+                }
                 EnHoll_SetupAction(this, EnHoll_NextAction);
             }
         }
@@ -186,11 +305,21 @@ void func_80A59014(EnHoll* this, PlayState* play) {
 
 // Vertical Planes
 void func_80A591C0(EnHoll* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
-    f32 absY = fabsf(this->actor.yDistToPlayer);
+    Player* player = EnHoll_GetTriggerPlayer(play, this);
+    f32 absY;
+    f32 yDist;
+    f32 xzDist;
     s32 transitionActorIdx;
 
-    if (this->actor.xzDistToPlayer < 500.0f && absY < 700.0f) {
+    if (player == NULL) {
+        return;
+    }
+
+    yDist = player->actor.world.pos.y - this->actor.world.pos.y;
+    xzDist = Math_Vec3f_DistXZ(&this->actor.world.pos, &player->actor.world.pos);
+    absY = fabsf(yDist);
+
+    if (xzDist < 500.0f && absY < 700.0f) {
         transitionActorIdx = (u16)this->actor.params >> 0xA;
         if (absY < 95.0f) {
             play->unk_11E18 = 0xFF;
@@ -203,10 +332,14 @@ void func_80A591C0(EnHoll* this, PlayState* play) {
             this->actor.room = play->transiActorCtx.list[transitionActorIdx].sides[1].room;
             Math_SmoothStepToF(&player->actor.world.pos.x, this->actor.world.pos.x, 1.0f, 50.0f, 10.0f);
             Math_SmoothStepToF(&player->actor.world.pos.z, this->actor.world.pos.z, 1.0f, 50.0f, 10.0f);
-            if (this->actor.room != play->roomCtx.curRoom.num &&
+            if (!EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room) &&
+                (this->actor.room != play->roomCtx.curRoom.num) &&
                 func_8009728C(play, &play->roomCtx, this->actor.room) != 0) {
                 EnHoll_SetupAction(this, EnHoll_NextAction);
                 this->unk_14F = 1;
+                if (this->actor.room >= 0) {
+                    player->actor.room = this->actor.room;
+                }
                 player->actor.speedXZ = 0.0f;
             }
         }
@@ -218,11 +351,22 @@ void func_80A591C0(EnHoll* this, PlayState* play) {
 
 // Vertical Planes
 void func_80A593A4(EnHoll* this, PlayState* play) {
+    Player* player = EnHoll_GetTriggerPlayer(play, this);
+    f32 xzDist;
+    f32 yDist;
     f32 absY;
     s32 side;
     s32 transitionActorIdx;
 
-    if ((this->actor.xzDistToPlayer < 120.0f) && (absY = fabsf(this->actor.yDistToPlayer), absY < 200.0f)) {
+    if (player == NULL) {
+        return;
+    }
+
+    xzDist = Math_Vec3f_DistXZ(&this->actor.world.pos, &player->actor.world.pos);
+    yDist = player->actor.world.pos.y - this->actor.world.pos.y;
+    absY = fabsf(yDist);
+
+    if ((xzDist < 120.0f) && (absY < 200.0f)) {
         if (absY < 50.0f) {
             play->unk_11E18 = 0xFF;
         } else {
@@ -230,12 +374,16 @@ void func_80A593A4(EnHoll* this, PlayState* play) {
         }
         if (absY > 50.0f) {
             transitionActorIdx = (u16)this->actor.params >> 0xA;
-            side = (0.0f < this->actor.yDistToPlayer) ? 0 : 1;
+            side = (0.0f < yDist) ? 0 : 1;
             this->actor.room = play->transiActorCtx.list[transitionActorIdx].sides[side].room;
-            if (this->actor.room != play->roomCtx.curRoom.num &&
+            if (!EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room) &&
+                (this->actor.room != play->roomCtx.curRoom.num) &&
                 func_8009728C(play, &play->roomCtx, this->actor.room) != 0) {
                 EnHoll_SetupAction(this, EnHoll_NextAction);
                 this->unk_14F = 1;
+                if (this->actor.room >= 0) {
+                    player->actor.room = this->actor.room;
+                }
             }
         }
     } else if (this->unk_14F != 0) {
@@ -246,19 +394,33 @@ void func_80A593A4(EnHoll* this, PlayState* play) {
 
 // Vertical Planes
 void func_80A59520(EnHoll* this, PlayState* play) {
+    Player* player = EnHoll_GetTriggerPlayer(play, this);
+    f32 xzDist;
+    f32 yDist;
     f32 absY;
     s8 side;
     s32 transitionActorIdx;
 
-    if (this->actor.xzDistToPlayer < 120.0f) {
-        absY = fabsf(this->actor.yDistToPlayer);
+    if (player == NULL) {
+        return;
+    }
+
+    xzDist = Math_Vec3f_DistXZ(&this->actor.world.pos, &player->actor.world.pos);
+    yDist = player->actor.world.pos.y - this->actor.world.pos.y;
+
+    if (xzDist < 120.0f) {
+        absY = fabsf(yDist);
         if (absY < 200.0f && absY > 50.0f) {
             transitionActorIdx = (u16)this->actor.params >> 0xA;
-            side = (0.0f < this->actor.yDistToPlayer) ? 0 : 1;
+            side = (0.0f < yDist) ? 0 : 1;
             this->actor.room = play->transiActorCtx.list[transitionActorIdx].sides[side].room;
-            if (this->actor.room != play->roomCtx.curRoom.num &&
+            if (!EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room) &&
+                (this->actor.room != play->roomCtx.curRoom.num) &&
                 func_8009728C(play, &play->roomCtx, this->actor.room) != 0) {
                 EnHoll_SetupAction(this, EnHoll_NextAction);
+                if (this->actor.room >= 0) {
+                    player->actor.room = this->actor.room;
+                }
             }
         }
     }
@@ -266,7 +428,7 @@ void func_80A59520(EnHoll* this, PlayState* play) {
 
 // Horizontal Planes
 void func_80A59618(EnHoll* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player;
     Vec3f vec;
     f32 absZ;
     s32 side;
@@ -278,6 +440,11 @@ void func_80A59618(EnHoll* this, PlayState* play) {
             this->unk_14F = 0;
         }
     } else {
+        player = EnHoll_GetTriggerPlayer(play, this);
+        if (player == NULL) {
+            return;
+        }
+
         Actor_WorldToActorCoords(&this->actor, &vec, &player->actor.world.pos);
         absZ = fabsf(vec.z);
         if (PLANE_Y_MIN < vec.y && vec.y < PLANE_Y_MAX && fabsf(vec.x) < PLANE_HALFWIDTH_2 && absZ < 100.0f) {
@@ -292,9 +459,13 @@ void func_80A59618(EnHoll* this, PlayState* play) {
             if (absZ < 50.0f) {
                 side = (vec.z < 0.0f) ? 0 : 1;
                 this->actor.room = play->transiActorCtx.list[transitionActorIdx].sides[side].room;
-                if (this->actor.room != play->roomCtx.curRoom.num &&
+                if (!EnHoll_ShouldSkipSecondaryRetainedSwap(play, player, this->actor.room) &&
+                    (this->actor.room != play->roomCtx.curRoom.num) &&
                     func_8009728C(play, &play->roomCtx, this->actor.room) != 0) {
                     EnHoll_SetupAction(this, EnHoll_NextAction);
+                    if (this->actor.room >= 0) {
+                        player->actor.room = this->actor.room;
+                    }
                 }
             }
         } else if (this->unk_14F != 0) {

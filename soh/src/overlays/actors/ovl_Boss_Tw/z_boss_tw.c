@@ -4814,7 +4814,7 @@ void BossTw_UpdateEffects(PlayState* play) {
                         }
 
                         if (!(play->gameplayFrames & 1)) {
-                            play->damagePlayer(play, -1);
+                            play->damagePlayer(play, GET_PLAYER(play), -1);
                         }
                     } else {
                         Math_ApproachF(&eff->workf[EFF_SCALE], 0.042f, 1.0f, 0.002f);

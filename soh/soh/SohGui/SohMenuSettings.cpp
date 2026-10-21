@@ -5,6 +5,7 @@
 #include "soh/OTRGlobals.h"
 #include <soh/GameVersions.h>
 #include "soh/ResourceManagerHelpers.h"
+#include "local_mp_hud_layout.h"
 #include "UIWidgets.hpp"
 #include <spdlog/fmt/fmt.h>
 
@@ -59,6 +60,9 @@ static const std::map<int32_t, const char*> bootSequenceLabels = {
     { BOOTSEQUENCE_WARPPOINT, "Warp Point" },
 };
 
+static s32 sLocalMPPlayerCountBeforeEdit = 2;
+static s32 sLocalMPPlayerCountWarningTarget = 2;
+
 const char* GetGameVersionString(uint32_t index) {
     uint32_t gameVersion = ResourceMgr_GetGameVersion(index);
     switch (gameVersion) {
@@ -109,6 +113,45 @@ extern "C" MessageTableEntry* sJpnMessageEntryTablePtr;
 static const std::array<MessageTableEntry**, LANGUAGE_MAX> messageTables = {
     &sNesMessageEntryTablePtr, &sGerMessageEntryTablePtr, &sFraMessageEntryTablePtr, &sJpnMessageEntryTablePtr
 };
+
+static void ApplyLocalMultiplayerDefaultsIfNeeded() {
+    const char* defaultsVersionCvar = CVAR_ENHANCEMENT("LocalMultiplayer.SettingsDefaultsVersion");
+    s32 defaultsVersion = CVarGetInteger(defaultsVersionCvar, 0);
+
+    if (defaultsVersion >= 3) {
+        return;
+    }
+
+    if (defaultsVersion < 1) {
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"), 1);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SecondItemSlot"), 1);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SecondItemSlotSideBySide"), 1);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.IndependentSlotUsage"), 0);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.RadialQuickItemMenu"), 1);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCarry"), 1);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.ElasticRopeMode"), 0);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas"), 0);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen"), 1);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenVertical"), 1);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenPerformanceMode"), 0);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenAggressiveMode"), 0);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.DebugMarkers"), 0);
+    }
+
+    if (defaultsVersion < 2) {
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.EnemySpawnMultiplier"), 0);
+    }
+
+    if (defaultsVersion < 3) {
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.BossMiniBossSpawnMultiplier"), 0);
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.ControlledEnemyScaling"), 0);
+    }
+
+    CVarSetInteger(defaultsVersionCvar, 3);
+
+    Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+}
 
 void SohMenu::UpdateLanguageMap(std::map<int32_t, const char*>& languageMap) {
     for (int32_t i = LANGUAGE_ENG; i < LANGUAGE_MAX; i++) {
@@ -525,14 +568,615 @@ void SohMenu::AddMenuSettings() {
         .RaceDisable(false)
         .Options(CheckboxOptions().Tooltip("Prevent notifications from playing a sound."));
 
-    // Mod Menu
-    path.sidebarName = "Mod Menu";
-    AddSidebarEntry("Settings", path.sidebarName, 1);
+    // Mods
+    path.sidebarName = "Mods";
+    path.column = SECTION_COLUMN_1;
+    AddSidebarEntry("Settings", path.sidebarName, 2);
+
+    AddWidget(path, "Graphics Mods", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Disable Bomb Billboarding", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("DisableBombBillboarding"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Disables bombs always rotating to face the camera. To be used in conjunction with mods that want to "
+            "replace bombs with 3D objects."));
+    AddWidget(path, "Disable Grotto Fixed Rotation", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("DisableGrottoRotation"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip(
+            "Disables Grottos rotating with the Camera. To be used in conjuction with mods that want to "
+            "replace grottos with 3D objects."));
+    AddWidget(path, "Disable Link's Sword Trail", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("DisableLinkSwordTrail"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip("Disables the sword trail effect when swinging Link's sword. Useful when "
+                                           "using mods that replace Link's sword model."));
+    AddWidget(path, "Disable 2D Pre-Rendered Scenes", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("3DSceneRender"))
+        .RaceDisable(false)
+        .Options(CheckboxOptions().Tooltip("Disables 2D pre-rendered backgrounds. Enable this when using a mod that "
+                                           "implements 3D backdrops for these areas.\n"
+                                           "Requires Scene Change to alter."));
+    AddWidget(path, "Disable Fixed Camera", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("DisableFixedCamera"))
+        .RaceDisable(false)
+        .PreFunc([](WidgetInfo& info) {
+            if (CVarGetInteger(CVAR_ENHANCEMENT("3DSceneRender"), 0) == 0) {
+                CVarSetInteger(CVAR_ENHANCEMENT("DisableFixedCamera"), 0);
+                info.options->disabled = true;
+            } else {
+                info.options->disabled = false;
+            }
+            info.options->disabledTooltip = "Requires \"Disable 2D Pre-Rendered Scenes\" to be enabled.";
+        })
+        .Options(CheckboxOptions().Tooltip(
+            "Disables the fixed camera in maps that use 2D pre-rendered backgrounds. Enable this when using a mod "
+            "that implements 3D backdrops for these areas.\n"
+            "Requires Scene Change to alter."));
+    AddWidget(path, "Ingame Text Spacing: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("TextSpacing"))
+        .RaceDisable(false)
+        .Options(IntSliderOptions().Min(4).Max(6).DefaultValue(6).Tooltip(
+            "Space between text characters (useful for HD font textures)."));
+
+    AddWidget(path, "Mod Menu", WIDGET_SEPARATOR_TEXT);
     AddWidget(path, "Popout Mod Menu Window", WIDGET_WINDOW_BUTTON)
         .CVar(CVAR_WINDOW("ModMenu"))
         .WindowName("Mod Menu")
         .HideInSearch(true)
         .Options(WindowButtonOptions().Tooltip("Enables the separate Mod Menu Window."));
+}
+
+void SohMenu::AddMenuLocalMultiplayer() {
+    ApplyLocalMultiplayerDefaultsIfNeeded();
+
+    AddMenuEntry("Local Multiplayer", CVAR_SETTING("Menu.LocalMultiplayerSidebarSection"));
+    AddSidebarEntry("Local Multiplayer", "General", 1);
+    AddSidebarEntry("Local Multiplayer", "WIP/debug stuff", 1);
+#if LOCAL_MP_HUD_LAYOUT_EDITOR
+    AddSidebarEntry("Local Multiplayer", "HUD Layout", 2);
+#endif
+
+    WidgetPath path = { "Local Multiplayer", "General", SECTION_COLUMN_1 };
+
+    AddWidget(path, "Settings", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Disable Local Multiplayer (run stock settings)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"))
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip(
+            "When enabled, disables local multiplayer."));
+    AddWidget(path, "Local Multiplayer Players: %d", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"))
+        .PreFunc([](WidgetInfo& info) {
+            sLocalMPPlayerCountBeforeEdit = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+        })
+        .Callback([](WidgetInfo& info) {
+            s32 newPlayerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            if ((sLocalMPPlayerCountBeforeEdit == 2) && (newPlayerCount >= 3)) {
+                sLocalMPPlayerCountWarningTarget = newPlayerCount;
+
+                // Revert immediately and only apply 3/4P if the user explicitly confirms.
+                CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), sLocalMPPlayerCountBeforeEdit);
+
+                SohGui::mModalWindow->RegisterPopup(
+                    "3-4P Warning",
+                    "the mod was not built on top of 3-4P gameplay, some crashes are bound to happen if you run "
+                    "this with splitscreen. are you sure you want to continue? if so, try enabling agressive "
+                    "performance mode",
+                    "Continue", "Cancel",
+                    []() {
+                        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"),
+                                       sLocalMPPlayerCountWarningTarget);
+                        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+                    },
+                    []() { Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame(); });
+
+                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+            }
+        })
+        .Options(IntSliderOptions()
+                     .Min(1)
+                     .Max(4)
+                     .DefaultValue(2)
+                     .Format("%d")
+                     .Tooltip("Spawns/despawns local controllable players"));
+    AddWidget(path, "Custom Item System", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"))
+        .PreFunc([](WidgetInfo& info) {
+            info.options->disabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0);
+            info.options->disabledTooltip = "Requires local multiplayer to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip(
+            "Uses an item system tailored with local co-op in mind:\n"
+            " - Players can use an optional second quick-item slot\n"
+            " - D-pad Left/Right cycles the selected slot\n"
+            " - D-pad Up/Down selects slot 1/2 while slot 2 is enabled\n"
+            " - L uses the selected slot\n\n"
+            "This mode ignores D-pad equip behavior (setting that puts items on d-pad)."));
+    AddWidget(path, "Enable Second Item Slot", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SecondItemSlot"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 localMultiplayerDisabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0);
+            s32 originalItemSystemEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"), 1);
+
+            info.options->disabled = localMultiplayerDisabled || !originalItemSystemEnabled;
+            info.options->disabledTooltip = localMultiplayerDisabled
+                                                ? "Requires local multiplayer to be enabled."
+                                                : "Requires custom item system to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip(
+            "Shows and enables an second quick-item slot.\n\n"
+            "When disabled:\n"
+            " - only slot 1 is active\n"
+            " - L always uses slot 1\n"
+            " - D-pad Left/Right cycles slot 1"));
+    AddWidget(path, "Place Second Slot Beside First", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SecondItemSlotSideBySide"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 localMultiplayerDisabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0);
+            s32 originalItemSystemEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"), 1);
+            s32 secondSlotEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SecondItemSlot"), 1);
+
+            info.options->disabled = localMultiplayerDisabled || !originalItemSystemEnabled || !secondSlotEnabled;
+                 info.options->disabledTooltip = localMultiplayerDisabled
+                                      ? "Requires local multiplayer to be enabled."
+                                      : (!originalItemSystemEnabled
+                                          ? "Requires custom item system to be enabled."
+                                          : "Requires the second item slot to be enabled.");
+        })
+        .Options(CheckboxOptions()
+                    .DefaultValue(true)
+                     .Tooltip(
+            "Places slot 2 beside slot 1 instead of directly below it.\n\n"));
+    AddWidget(path, "Independent Slot Usage", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.IndependentSlotUsage"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 localMultiplayerDisabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0);
+            s32 originalItemSystemEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"), 1);
+            s32 secondSlotEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SecondItemSlot"), 1);
+
+            info.options->disabled = localMultiplayerDisabled || !originalItemSystemEnabled || !secondSlotEnabled;
+                 info.options->disabledTooltip = localMultiplayerDisabled
+                                      ? "Requires local multiplayer to be enabled."
+                                      : (!originalItemSystemEnabled
+                                          ? "Requires custom item system to be enabled."
+                                          : "Requires the second item slot to be enabled.");
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip(
+            "Changes how quick slots are used:\n\n"
+            "When disabled (default):\n"
+            " - L uses the selected slot\n"
+            " - D-pad Up/Down selects slot 1/2\n\n"
+            "When enabled:\n"
+            " - L always uses slot 1\n"
+            " - D-pad Down uses slot 2\n"
+            " - D-pad Up only changes which slot is cycled by Left/Right"));
+    AddWidget(path, "Use Radial Quick Item Menu", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.RadialQuickItemMenu"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 localMultiplayerDisabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0);
+            s32 originalItemSystemEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"), 1);
+
+            info.options->disabled = localMultiplayerDisabled || !originalItemSystemEnabled;
+            info.options->disabledTooltip = localMultiplayerDisabled
+                                                ? "Requires local multiplayer to be enabled."
+                                                : "Requires custom item system to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip(
+            "Replaces D-pad Left/Right item cycling with a radial quick-swap wheel.\n\n"
+            "Controls:\n"
+            " - Hold D-pad Left or Right to open the radial menu\n"
+            " - Tilt the left Control Stick to highlight an item\n"
+            " - Release D-pad Left/Right to equip the highlighted item\n\n"
+            "D-pad Up/Down slot controls remain unchanged."));
+    AddWidget(path, "Use Right Stick for Radial Quick Item Menu", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.RadialQuickItemMenuRightStick"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 localMultiplayerDisabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0);
+            s32 originalItemSystemEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"), 1);
+            s32 radialMenuEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.RadialQuickItemMenu"), 0);
+
+            info.options->disabled = localMultiplayerDisabled || !originalItemSystemEnabled || !radialMenuEnabled;
+            info.options->disabledTooltip = localMultiplayerDisabled
+                                                ? "Requires local multiplayer to be enabled."
+                                                : (!originalItemSystemEnabled
+                                                       ? "Requires custom item system to be enabled."
+                                                       : "Requires radial quick item menu to be enabled.");
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip(
+            "Uses the right (camera) stick to highlight items in the radial quick-swap wheel.\n\n"
+            "When disabled:\n"
+            " - Left stick highlights radial menu items\n\n"
+            "When enabled:\n"
+            " - Right stick highlights radial menu items\n"
+            " - Left stick remains dedicated to moving."));
+    AddWidget(path, "Enable Player Pickup and Throw", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCarry"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Allows local players to pick up and throw each other.\n"
+                              "(Carried players can break free by pressing A)."));
+    AddWidget(path, "Chaotix Ring Teather", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.ElasticRopeMode"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Adds a shared elastic link between players.\n"
+                              "The farther a player gets from the group, the stronger the pull back.\n"
+                              "In 2P, players are tethered to each other. In 3P/4P, players are tethered to the\n"
+                              "group center."));
+    AddWidget(path, "Elastic Rope Strength", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.ElasticRopeStrength"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(FloatSliderOptions()
+                     .DefaultValue(1.0f)
+                     .Min(0.25f)
+                     .Max(3.0f)
+                     .Step(0.05f)
+                     .Format("%.2f")
+                     .Tooltip("Adjusts how strongly the rope pulls players together.\n"
+                              "Lower values make the rope looser and allow more separation.\n"
+                              "Higher values tighten the rope and pull harder."));
+    AddWidget(path, "Teleport Target Player", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.TeleportTargetPlayer"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(IntSliderOptions()
+                     .DefaultValue(1)
+                     .Min(1)
+                     .Max(4)
+                     .Format("Player %d")
+                     .Tooltip("Selects which player all players teleport to when the button below is pressed."));
+    AddWidget(path, "Teleport All Players To Target", WIDGET_BUTTON)
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Callback([](WidgetInfo& info) {
+            s32 request = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.TeleportAllToSelectedRequest"), 0);
+
+            if (request < 0) {
+                request = 0;
+            }
+
+            CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.TeleportAllToSelectedRequest"), request + 1);
+            Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
+        })
+        .Options(ButtonOptions().Tooltip("Teleports every player to the selected target player's position."));
+    AddWidget(path, "Per-Player Tunic Colors", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "P1 Tunic Color", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.Player1TunicColor"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(ColorPickerOptions()
+                     .DefaultValue({ 30, 105, 27, 255 })
+                     .UseAlpha(false)
+                     .ShowReset(true)
+                     .ShowRandom(true)
+                     .ShowRainbow(false)
+                     .ShowLock(false)
+                     .Tooltip("Default: green."));
+    AddWidget(path, "P2 Tunic Color", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.Player2TunicColor"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(ColorPickerOptions()
+                     .DefaultValue({ 255, 0, 0, 255 })
+                     .UseAlpha(false)
+                     .ShowReset(true)
+                     .ShowRandom(true)
+                     .ShowRainbow(false)
+                     .ShowLock(false)
+                     .Tooltip("Default: red."));
+    AddWidget(path, "P3 Tunic Color", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.Player3TunicColor"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 2;
+            info.options->disabledTooltip = "Requires local multiplayer with 3 or more players.";
+        })
+        .Options(ColorPickerOptions()
+                     .DefaultValue({ 0, 120, 255, 255 })
+                     .UseAlpha(false)
+                     .ShowReset(true)
+                     .ShowRandom(true)
+                     .ShowRainbow(false)
+                     .ShowLock(false)
+                     .Tooltip("Default: blue."));
+    AddWidget(path, "P4 Tunic Color", WIDGET_CVAR_COLOR_PICKER)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.Player4TunicColor"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 3;
+            info.options->disabledTooltip = "Requires local multiplayer with 4 players.";
+        })
+        .Options(ColorPickerOptions()
+                     .DefaultValue({ 122, 57, 163, 255 })
+                     .UseAlpha(false)
+                     .ShowReset(true)
+                     .ShowRandom(true)
+                     .ShowRainbow(false)
+                     .ShowLock(false)
+                     .Tooltip("Default: purple."));
+    AddWidget(path, "Enable Splitscreen", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Renders one camera viewport per local player.\n"
+                              "Supports 2, 3, and 4 player split-screen layouts."));
+    AddWidget(path, "Vertical Split-Screen (2P/3P)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenVertical"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+            bool splitScreenEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen"), 1) != 0;
+
+            info.options->disabled = (playerCount <= 1) || !splitScreenEnabled;
+            info.options->disabledTooltip = "Requires local multiplayer split-screen to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("For 2-player split-screen, choose vertical (left/right) layout when enabled.\n"
+                              "When disabled, 2-player uses horizontal (top/bottom) layout."));
+    AddWidget(path, "Split-Screen Performance Mode (Reduced Effects)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenPerformanceMode"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+            bool splitScreenEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen"), 1) != 0;
+
+            info.options->disabled = (playerCount <= 1) || !splitScreenEnabled;
+            info.options->disabledTooltip = "Requires local multiplayer split-screen to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Improves split-screen performance by reducing duplicate secondary viewport effects.\n\n"
+                              "Applies to non-primary split viewports:\n"
+                              " - skips previous-room blend pass\n"
+                              " - skips rain and skybox quake pass\n"
+                              " - skips lens flare effects\n\n"
+                              "Recommended for low-end hardware (or if the game memory runs out)."));
+    AddWidget(path, "Split-Screen Aggressive Performance Mode", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenAggressiveMode"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+            bool splitScreenEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen"), 1) != 0;
+            bool perfModeEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenPerformanceMode"), 1) != 0;
+
+            info.options->disabled = (playerCount <= 1) || !splitScreenEnabled || !perfModeEnabled;
+            info.options->disabledTooltip =
+                "Requires local multiplayer split-screen and performance mode to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Maximum split-screen performance mode for low-end hardware.\n\n"
+                              "Applies stronger reductions:\n"
+                              " - uses opaque room pass only\n"
+                              " - skips skybox/rain/lightning/lens effects\n"
+                              " - draws only player actors in secondary split viewports\n"
+                              " - disables local multiplayer debug marker rendering\n\n"
+                              "Best for preventing crashes in resource-heavy areas."));
+    path = { "Local Multiplayer", "WIP/debug stuff", SECTION_COLUMN_1 };
+
+    AddWidget(path, "Scale Room Enemy Spawns by Player Count", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.EnemySpawnMultiplier"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("When enabled, enemies loaded from room setup actor lists are spawned once per local "
+                              "player.\n\n"
+                              "Example:\n"
+                              " - 1 enemy in 2P becomes 2\n"
+                              " - 3 enemies in 2P become 6\n"
+                              " - 2 enemies in 4P become 8"));
+    AddWidget(path, "Scale Bosses and Minibosses by Player Count", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.BossMiniBossSpawnMultiplier"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+            bool enemyScalingEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.EnemySpawnMultiplier"), 0) != 0;
+
+            info.options->disabled = (playerCount <= 1) || !enemyScalingEnabled;
+            info.options->disabledTooltip =
+                (playerCount <= 1)
+                    ? "Requires local multiplayer with 2 or more players."
+                    : "Requires room enemy spawn scaling to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("When enabled, room setup bosses and minibosses can also be multiplied by player "
+                              "count.\n\n"
+                              "Safety blacklist in this mode:\n"
+                              " - Gohma\n"
+                              " - Volvagia (both forms)\n"
+                              " - Dark Link"));
+    AddWidget(path, "Controlled Enemy Scaling (Whitelist Only)", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.ControlledEnemyScaling"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+            bool enemyScalingEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.EnemySpawnMultiplier"), 0) != 0;
+
+            info.options->disabled = (playerCount <= 1) || !enemyScalingEnabled;
+            info.options->disabledTooltip =
+                (playerCount <= 1)
+                    ? "Requires local multiplayer with 2 or more players."
+                    : "Requires room enemy spawn scaling to be enabled.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("When enabled, only this whitelist is multiplied by player count:\n"
+                              " - Blue Tektite\n"
+                              " - Dinolfos\n"
+                              " - Dodongo\n"
+                              " - Lizalfos\n"
+                              " - Iron Knuckle\n"
+                              " - Stalchild\n"
+                              " - Stalfos\n"
+                              " - Torch Slug\n"
+                              " - White Wolfos\n"
+                              " - Wolfos\n"
+                              " - Dark Link\n"
+                              " - Gerudo Thief\n\n"
+                              "This mode ignores boss/miniboss scaling rules and uses only the whitelist."));
+    AddWidget(path, "Allow Player 2-4 to Load Areas", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Allows players 2-4 to trigger area loading checks (like invisible exit boundaries).\n"
+                              "Useful for dungeon room transitions and connected area boundaries.\n"
+                              "Doesn't really work and disables player 2-4 teleporting to p1"));
+    AddWidget(path, "Local Multiplayer Debug Markers", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.DebugMarkers"))
+        .Options(CheckboxOptions()
+                 .DefaultValue(false)
+                 .Tooltip("Draw debug markers for local multiplayer positions and midpoint camera."));
+
+#if LOCAL_MP_HUD_LAYOUT_EDITOR
+    static char hudCvarNames[4][4][2][64];
+    static bool hudCvarNamesInitialized = false;
+
+    if (!hudCvarNamesInitialized) {
+        static const char* elementNames[4] = { "Hearts", "Sword", "Items", "Magic" };
+
+        for (s32 player = 0; player < 4; player++) {
+            for (s32 element = 0; element < 4; element++) {
+                for (s32 axis = 0; axis < 2; axis++) {
+                    snprintf(hudCvarNames[player][element][axis], sizeof(hudCvarNames[player][element][axis]),
+                             "gEnhancements.LocalMultiplayer.HUD.Editor.Player%d.%s%s", player + 1, elementNames[element],
+                             (axis == 0) ? "X" : "Y");
+                }
+            }
+        }
+
+        hudCvarNamesInitialized = true;
+    }
+
+    static const char* hudElementNames[4] = { "Hearts", "Sword", "Items", "Magic" };
+
+    path = { "Local Multiplayer", "HUD Layout", SECTION_COLUMN_1 };
+
+    for (s32 player = 0; player < 4; player++) {
+        path.column = (player < 2) ? SECTION_COLUMN_1 : SECTION_COLUMN_2;
+        AddWidget(path, "Player " + std::to_string(player + 1) + " HUD", WIDGET_SEPARATOR_TEXT);
+
+        for (s32 element = 0; element < 4; element++) {
+            for (s32 axis = 0; axis < 2; axis++) {
+                AddWidget(path,
+                          "P" + std::to_string(player + 1) + " " + hudElementNames[element] +
+                              ((axis == 0) ? " X" : " Y"),
+                          WIDGET_CVAR_SLIDER_INT)
+                    .CVar(hudCvarNames[player][element][axis])
+                    .PreFunc([player](WidgetInfo& info) {
+                        s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                              ? 1
+                                              : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+                        info.options->disabled = playerCount <= player;
+                        info.options->disabledTooltip =
+                            "Requires local multiplayer with at least " + std::to_string(player + 1) + " player(s).";
+                    })
+                    .Options(IntSliderOptions()
+                                 .DefaultValue(0)
+                                 .Min(-320)
+                                 .Max(320)
+                                 .Format("%d")
+                                 .Tooltip("Adjusts this HUD element from its tuned baseline position for this player."));
+            }
+        }
+    }
+#endif
 }
 
 } // namespace SohGui

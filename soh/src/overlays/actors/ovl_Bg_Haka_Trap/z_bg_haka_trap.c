@@ -30,6 +30,21 @@ void func_80880D68(BgHakaTrap* this);
 
 UNK_TYPE D_80880F30 = 0;
 
+static Player* BgHakaTrap_GetTargetPlayer(BgHakaTrap* this, PlayState* play) {
+    Player* player;
+
+    if ((this == NULL) || (play == NULL)) {
+        return NULL;
+    }
+
+    player = Actor_GetClosestPlayer(play, &this->dyna.actor);
+    if (player == NULL) {
+        player = GET_PLAYER(play);
+    }
+
+    return player;
+}
+
 const ActorInit Bg_Haka_Trap_InitVars = {
     ACTOR_BG_HAKA_TRAP,
     ACTORCAT_BG,
@@ -208,7 +223,11 @@ void func_8087FFC0(BgHakaTrap* this, PlayState* play) {
     Vec3f sp28;
     f32 sine;
     f32 zNonNegative;
-    Player* player = GET_PLAYER(play);
+    Player* player = BgHakaTrap_GetTargetPlayer(this, play);
+
+    if (player == NULL) {
+        return;
+    }
 
     Actor_WorldToActorCoords(&this->dyna.actor, &sp28, &player->actor.world.pos);
 
@@ -230,7 +249,7 @@ void func_8087FFC0(BgHakaTrap* this, PlayState* play) {
 
 static UNK_TYPE D_80881018 = 0;
 void func_808801B8(BgHakaTrap* this, PlayState* play) {
-    Player* player = GET_PLAYER(play);
+    Player* player = BgHakaTrap_GetTargetPlayer(this, play);
 
     if ((D_80880F30 == 0) && (!Player_InCsMode(play))) {
         if (!Math_StepToF(&this->dyna.actor.world.pos.x, this->dyna.actor.home.pos.x, 0.5f)) {
@@ -248,7 +267,7 @@ void func_808801B8(BgHakaTrap* this, PlayState* play) {
         this->timer = 20;
         D_80880F30 = 1;
         this->actionFunc = func_808802D8;
-    } else if (D_80881018 == 3) {
+    } else if ((D_80881018 == 3) && (player != NULL)) {
         D_80881018 = 4;
         player->actor.bgCheckFlags |= 0x100;
     }
@@ -430,13 +449,17 @@ void func_808809B0(BgHakaTrap* this, PlayState* play) {
 }
 
 void func_808809E4(BgHakaTrap* this, PlayState* play, s16 arg2) {
-    Player* player = GET_PLAYER(play);
+    Player* player = BgHakaTrap_GetTargetPlayer(this, play);
     Vec3f sp18;
+
+    if (player == NULL) {
+        return;
+    }
 
     Actor_WorldToActorCoords(&this->dyna.actor, &sp18, &player->actor.world.pos);
 
     if ((fabsf(sp18.x) < 70.0f) && (fabsf(sp18.y) < 100.0f) && (sp18.z < 500.0f) &&
-        (GET_PLAYER(play)->currentBoots != PLAYER_BOOTS_IRON)) {
+        (player->currentBoots != PLAYER_BOOTS_IRON)) {
         player->pushedSpeed = ((500.0f - sp18.z) * 0.06f + 5.0f) * arg2 * (1.0f / 0x3A00) * (2.0f / 3.0f);
         player->pushedYaw = this->dyna.actor.shape.rot.y;
     }

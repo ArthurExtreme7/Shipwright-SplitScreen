@@ -26,6 +26,25 @@ namespace SohGui {
 extern std::shared_ptr<SohMenu> mSohMenu;
 }
 
+static std::string GetCameraControlsCVarForPort(const char* baseCVar, uint8_t portIndex) {
+    if (portIndex == 0) {
+        return baseCVar;
+    }
+
+    const std::string cvarName = StringHelper::Sprintf("%s_P%d", baseCVar, portIndex + 1);
+    const std::string legacyCvarName = StringHelper::Sprintf("%s.P%d", baseCVar, portIndex + 1);
+
+    if (CVarExists(legacyCvarName.c_str())) {
+        if (!CVarExists(cvarName.c_str())) {
+            CVarCopy(legacyCvarName.c_str(), cvarName.c_str());
+        }
+
+        CVarClear(legacyCvarName.c_str());
+    }
+
+    return cvarName;
+}
+
 SohInputEditorWindow::~SohInputEditorWindow() {
 }
 
@@ -1364,57 +1383,94 @@ void SohInputEditorWindow::DrawOcarinaControlPanel() {
     }
 }
 
-void SohInputEditorWindow::DrawCameraControlPanel() {
+void SohInputEditorWindow::DrawCameraControlPanel(uint8_t portIndex) {
+    const std::string rightStickAimCVar = GetCameraControlsCVarForPort(CVAR_SETTING("Controls.RightStickAim"), portIndex);
+    const std::string moveInFirstPersonCVar = GetCameraControlsCVarForPort(CVAR_SETTING("MoveInFirstPerson"), portIndex);
+    const std::string invertAimingXAxisCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("Controls.InvertAimingXAxis"), portIndex);
+    const std::string invertAimingYAxisCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("Controls.InvertAimingYAxis"), portIndex);
+    const std::string invertShieldAimingXAxisCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("Controls.InvertShieldAimingXAxis"), portIndex);
+    const std::string invertShieldAimingYAxisCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("Controls.InvertShieldAimingYAxis"), portIndex);
+    const std::string invertZAimingYAxisCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("Controls.InvertZAimingYAxis"), portIndex);
+    const std::string disableFirstPersonAutoCenterViewCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("DisableFirstPersonAutoCenterView"), portIndex);
+    const std::string firstPersonCameraSensitivityEnabledCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FirstPersonCameraSensitivity.Enabled"), portIndex);
+    const std::string firstPersonCameraSensitivityXCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FirstPersonCameraSensitivity.X"), portIndex);
+    const std::string firstPersonCameraSensitivityYCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FirstPersonCameraSensitivity.Y"), portIndex);
+    const std::string freeLookEnabledCVar = GetCameraControlsCVarForPort(CVAR_SETTING("FreeLook.Enabled"), portIndex);
+    const std::string invertFreeLookXAxisCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FreeLook.InvertXAxis"), portIndex);
+    const std::string invertFreeLookYAxisCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FreeLook.InvertYAxis"), portIndex);
+    const std::string freeLookCameraSensitivityXCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FreeLook.CameraSensitivity.X"), portIndex);
+    const std::string freeLookCameraSensitivityYCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FreeLook.CameraSensitivity.Y"), portIndex);
+    const std::string freeLookMaxCameraDistanceCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FreeLook.MaxCameraDistance"), portIndex);
+    const std::string freeLookTransitionSpeedCVar =
+        GetCameraControlsCVarForPort(CVAR_SETTING("FreeLook.TransitionSpeed"), portIndex);
+    const bool rightStickAimEnabled = CVarGetInteger(rightStickAimCVar.c_str(), 0) != 0;
+
     ImVec2 cursor = ImGui::GetCursorPos();
-    ImGui::SetCursorPos(ImVec2(cursor.x + 5, cursor.y + 5));
-    SohGui::mSohMenu->MenuDrawItem(mouseControl, ImGui::GetContentRegionAvail().x, THEME_COLOR);
-    cursor = ImGui::GetCursorPos();
-    ImGui::SetCursorPos(ImVec2(cursor.x + 5, cursor.y + 5));
-    SohGui::mSohMenu->MenuDrawItem(mouseAutoCapture, ImGui::GetContentRegionAvail().x, THEME_COLOR);
+    if (portIndex == 0) {
+        ImGui::SetCursorPos(ImVec2(cursor.x + 5, cursor.y + 5));
+        SohGui::mSohMenu->MenuDrawItem(mouseControl, ImGui::GetContentRegionAvail().x, THEME_COLOR);
+        cursor = ImGui::GetCursorPos();
+        ImGui::SetCursorPos(ImVec2(cursor.x + 5, cursor.y + 5));
+        SohGui::mSohMenu->MenuDrawItem(mouseAutoCapture, ImGui::GetContentRegionAvail().x, THEME_COLOR);
+    }
 
     Ship::GuiWindow::BeginGroupPanel("Aiming/First-Person Camera", ImGui::GetContentRegionAvail());
-    CVarCheckbox("Right Stick Aiming", CVAR_SETTING("Controls.RightStickAim"),
+    CVarCheckbox("Right Stick Aiming", rightStickAimCVar.c_str(),
                  CheckboxOptions()
                      .Color(THEME_COLOR)
                      .Tooltip("Allows for aiming with the right stick in:\n-First-Person/C-Up view\n-Weapon Aiming"));
-    CVarCheckbox("Allow moving while in first-person mode", CVAR_SETTING("MoveInFirstPerson"),
-                 CheckboxOptions({ { .disabled = !CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0),
+    CVarCheckbox("Allow moving while in first-person mode", moveInFirstPersonCVar.c_str(),
+                 CheckboxOptions({ { .disabled = !rightStickAimEnabled,
                                      .disabledTooltip = "Forced off because Right Stick Aiming is disabled." } })
                      .Color(THEME_COLOR)
                      .Tooltip("Changes the left stick to move the player while in first-person mode"));
-    CVarCheckbox("Invert Aiming X Axis", CVAR_SETTING("Controls.InvertAimingXAxis"),
+    CVarCheckbox("Invert Aiming X Axis", invertAimingXAxisCVar.c_str(),
                  CheckboxOptions()
                      .Color(THEME_COLOR)
                      .Tooltip("Inverts the Camera X Axis in:\n-First-Person/C-Up view\n-Weapon Aiming"));
-    CVarCheckbox("Invert Aiming Y Axis", CVAR_SETTING("Controls.InvertAimingYAxis"),
+    CVarCheckbox("Invert Aiming Y Axis", invertAimingYAxisCVar.c_str(),
                  CheckboxOptions()
                      .Color(THEME_COLOR)
                      .DefaultValue(true)
                      .Tooltip("Inverts the Camera Y Axis in:\n-First-Person/C-Up view\n-Weapon Aiming"));
-    CVarCheckbox("Invert Shield Aiming X Axis", CVAR_SETTING("Controls.InvertShieldAimingXAxis"),
+    CVarCheckbox("Invert Shield Aiming X Axis", invertShieldAimingXAxisCVar.c_str(),
                  CheckboxOptions().Color(THEME_COLOR).DefaultValue(true).Tooltip("Inverts the Shield Aiming X Axis"));
-    CVarCheckbox("Invert Shield Aiming Y Axis", CVAR_SETTING("Controls.InvertShieldAimingYAxis"),
+    CVarCheckbox("Invert Shield Aiming Y Axis", invertShieldAimingYAxisCVar.c_str(),
                  CheckboxOptions().Color(THEME_COLOR).Tooltip("Inverts the Shield Aiming Y Axis"));
-    CVarCheckbox("Invert Z-Weapon Aiming Y Axis", CVAR_SETTING("Controls.InvertZAimingYAxis"),
+    CVarCheckbox("Invert Z-Weapon Aiming Y Axis", invertZAimingYAxisCVar.c_str(),
                  CheckboxOptions()
                      .Color(THEME_COLOR)
                      .DefaultValue(true)
                      .Tooltip("Inverts the Camera Y Axis in:\n-Z-Weapon Aiming"));
-    CVarCheckbox("Disable Auto-Centering in First-Person View", CVAR_SETTING("DisableFirstPersonAutoCenterView"),
+    CVarCheckbox("Disable Auto-Centering in First-Person View", disableFirstPersonAutoCenterViewCVar.c_str(),
                  CheckboxOptions()
                      .Color(THEME_COLOR)
                      .Tooltip("Prevents the C-Up view from auto-centering, allowing for Gyro Aiming"));
     if (CVarCheckbox("Enable Custom Aiming/First-Person sensitivity",
-                     CVAR_SETTING("FirstPersonCameraSensitivity.Enabled"), CheckboxOptions().Color(THEME_COLOR))) {
-        if (!CVarGetInteger(CVAR_SETTING("FirstPersonCameraSensitivity.Enabled"), 0)) {
-            CVarClear(CVAR_SETTING("FirstPersonCameraSensitivity.X"));
-            CVarClear(CVAR_SETTING("FirstPersonCameraSensitivity.Y"));
+                     firstPersonCameraSensitivityEnabledCVar.c_str(), CheckboxOptions().Color(THEME_COLOR))) {
+        if (!CVarGetInteger(firstPersonCameraSensitivityEnabledCVar.c_str(), 0)) {
+            CVarClear(firstPersonCameraSensitivityXCVar.c_str());
+            CVarClear(firstPersonCameraSensitivityYCVar.c_str());
             Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
         }
     }
-    if (CVarGetInteger(CVAR_SETTING("FirstPersonCameraSensitivity.Enabled"), 0)) {
+    if (CVarGetInteger(firstPersonCameraSensitivityEnabledCVar.c_str(), 0)) {
         CVarSliderFloat("Aiming/First-Person Horizontal Sensitivity: %.0f %%",
-                        CVAR_SETTING("FirstPersonCameraSensitivity.X"),
+                        firstPersonCameraSensitivityXCVar.c_str(),
                         FloatSliderOptions()
                             .Color(THEME_COLOR)
                             .IsPercentage()
@@ -1423,7 +1479,7 @@ void SohInputEditorWindow::DrawCameraControlPanel() {
                             .DefaultValue(1.0f)
                             .ShowButtons(true));
         CVarSliderFloat("Aiming/First-Person Vertical Sensitivity: %.0f %%",
-                        CVAR_SETTING("FirstPersonCameraSensitivity.Y"),
+                        firstPersonCameraSensitivityYCVar.c_str(),
                         FloatSliderOptions()
                             .Color(THEME_COLOR)
                             .IsPercentage()
@@ -1438,13 +1494,23 @@ void SohInputEditorWindow::DrawCameraControlPanel() {
     ImGui::SetCursorPos(ImVec2(cursor.x + 5, cursor.y + 5));
     Ship::GuiWindow::BeginGroupPanel("Third-Person Camera", ImGui::GetContentRegionAvail());
 
-    SohGui::mSohMenu->MenuDrawItem(freeLook, ImGui::GetContentRegionAvail().x, THEME_COLOR);
-    CVarCheckbox("Invert Camera X Axis", CVAR_SETTING("FreeLook.InvertXAxis"),
+    if (portIndex == 0) {
+        SohGui::mSohMenu->MenuDrawItem(freeLook, ImGui::GetContentRegionAvail().x, THEME_COLOR);
+    } else {
+        CVarCheckbox(
+            "Free Look", freeLookEnabledCVar.c_str(),
+            CheckboxOptions()
+                .Color(THEME_COLOR)
+                .Tooltip("Enables free look camera control\nNote: You must remap C buttons off of the right stick "
+                         "in the controller config menu, and map the camera stick to the right stick.\n"
+                         "Doesn't work in areas were the game locks the camera.\n"
+                         "Scene reload may be necessary to enable."));
+    }
+    CVarCheckbox("Invert Camera X Axis", invertFreeLookXAxisCVar.c_str(),
                  CheckboxOptions().Color(THEME_COLOR).Tooltip("Inverts the Camera X Axis in:\n-Free look"));
-    CVarCheckbox(
-        "Invert Camera Y Axis", CVAR_SETTING("FreeLook.InvertYAxis"),
-        CheckboxOptions().Color(THEME_COLOR).DefaultValue(true).Tooltip("Inverts the Camera Y Axis in:\n-Free look"));
-    CVarSliderFloat("Third-Person Horizontal Sensitivity: %.0f %%", CVAR_SETTING("FreeLook.CameraSensitivity.X"),
+    CVarCheckbox("Invert Camera Y Axis", invertFreeLookYAxisCVar.c_str(),
+                 CheckboxOptions().Color(THEME_COLOR).DefaultValue(true).Tooltip("Inverts the Camera Y Axis in:\n-Free look"));
+    CVarSliderFloat("Third-Person Horizontal Sensitivity: %.0f %%", freeLookCameraSensitivityXCVar.c_str(),
                     FloatSliderOptions()
                         .Color(THEME_COLOR)
                         .IsPercentage()
@@ -1452,7 +1518,7 @@ void SohInputEditorWindow::DrawCameraControlPanel() {
                         .Max(5.0f)
                         .DefaultValue(1.0f)
                         .ShowButtons(true));
-    CVarSliderFloat("Third-Person Vertical Sensitivity: %.0f %%", CVAR_SETTING("FreeLook.CameraSensitivity.Y"),
+    CVarSliderFloat("Third-Person Vertical Sensitivity: %.0f %%", freeLookCameraSensitivityYCVar.c_str(),
                     FloatSliderOptions()
                         .Color(THEME_COLOR)
                         .IsPercentage()
@@ -1460,9 +1526,9 @@ void SohInputEditorWindow::DrawCameraControlPanel() {
                         .Max(5.0f)
                         .DefaultValue(1.0f)
                         .ShowButtons(true));
-    CVarSliderInt("Camera Distance: %d", CVAR_SETTING("FreeLook.MaxCameraDistance"),
+    CVarSliderInt("Camera Distance: %d", freeLookMaxCameraDistanceCVar.c_str(),
                   IntSliderOptions().Color(THEME_COLOR).Min(100).Max(900).DefaultValue(185).ShowButtons(true));
-    CVarSliderInt("Camera Transition Speed: %d", CVAR_SETTING("FreeLook.TransitionSpeed"),
+    CVarSliderInt("Camera Transition Speed: %d", freeLookTransitionSpeedCVar.c_str(),
                   IntSliderOptions().Color(THEME_COLOR).Min(0).Max(900).DefaultValue(25).ShowButtons(true));
     Ship::GuiWindow::EndGroupPanel(0);
 }
@@ -1611,7 +1677,7 @@ void SohInputEditorWindow::DrawLinkTab() {
             ImGui::PopStyleColor();
             ImGui::PopStyleColor();
             ImGui::PopStyleColor();
-            DrawCameraControlPanel();
+            DrawCameraControlPanel(portIndex);
             ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.133f, 0.133f, 0.133f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
@@ -1634,58 +1700,13 @@ void SohInputEditorWindow::DrawLinkTab() {
     }
 }
 
-void SohInputEditorWindow::DrawIvanTab() {
-    if (CVarGetInteger(CVAR_DEVELOPER_TOOLS("DebugEnabled"), 0)) {
-        DrawDebugPortTab(1, "Ivan (P2)");
-        return;
-    }
-
-    uint8_t portIndex = 1;
-    if (ImGui::BeginTabItem(StringHelper::Sprintf("Ivan (P2)###port%d", portIndex).c_str())) {
-        DrawClearAllButton(portIndex);
-        DrawSetDefaultsButton(portIndex);
-        DrawDeviceToggles(portIndex);
-
-        UpdateBitmaskToMappingIds(portIndex);
-        UpdateStickDirectionToMappingIds(portIndex);
-
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.133f, 0.133f, 0.133f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-
-        if (ImGui::CollapsingHeader("Buttons", NULL, ImGuiTreeNodeFlags_DefaultOpen)) {
-            DrawButtonLine("A", portIndex, BTN_A, CHIP_COLOR_N64_BLUE);
-            DrawButtonLine("B", portIndex, BTN_B, CHIP_COLOR_N64_GREEN);
-            DrawButtonLine("Z", portIndex, BTN_Z);
-            DrawButtonLine(StringHelper::Sprintf("C %s", ICON_FA_ARROW_UP).c_str(), portIndex, BTN_CUP,
-                           CHIP_COLOR_N64_YELLOW);
-            DrawButtonLine(StringHelper::Sprintf("C %s", ICON_FA_ARROW_DOWN).c_str(), portIndex, BTN_CDOWN,
-                           CHIP_COLOR_N64_YELLOW);
-            DrawButtonLine(StringHelper::Sprintf("C %s", ICON_FA_ARROW_LEFT).c_str(), portIndex, BTN_CLEFT,
-                           CHIP_COLOR_N64_YELLOW);
-            DrawButtonLine(StringHelper::Sprintf("C %s", ICON_FA_ARROW_RIGHT).c_str(), portIndex, BTN_CRIGHT,
-                           CHIP_COLOR_N64_YELLOW);
-        }
-
-        if (ImGui::CollapsingHeader("D-Pad", NULL, ImGuiTreeNodeFlags_DefaultOpen)) {
-            DrawButtonLine(StringHelper::Sprintf("%s", ICON_FA_ARROW_UP).c_str(), portIndex, BTN_DUP);
-            DrawButtonLine(StringHelper::Sprintf("%s", ICON_FA_ARROW_DOWN).c_str(), portIndex, BTN_DDOWN);
-            DrawButtonLine(StringHelper::Sprintf("%s", ICON_FA_ARROW_LEFT).c_str(), portIndex, BTN_DLEFT);
-            DrawButtonLine(StringHelper::Sprintf("%s", ICON_FA_ARROW_RIGHT).c_str(), portIndex, BTN_DRIGHT);
-        }
-
-        if (ImGui::CollapsingHeader("Analog Stick", NULL, ImGuiTreeNodeFlags_DefaultOpen)) {
-            DrawStickSection(portIndex, Ship::LEFT, 0);
-        }
-
-        ImGui::PopStyleColor();
-        ImGui::PopStyleColor();
-        ImGui::PopStyleColor();
-        ImGui::EndTabItem();
-    }
+void SohInputEditorWindow::DrawMultiplayerTabs() {
+    DrawPlayerPortTab(1, "Player 2 (P2)###port1");
+    DrawPlayerPortTab(2, "Player 3 (P3)###port2"); 
+    DrawPlayerPortTab(3, "Player 4 (P4)###port3");
 }
 
-void SohInputEditorWindow::DrawDebugPortTab(uint8_t portIndex, std::string customName) {
+void SohInputEditorWindow::DrawPlayerPortTab(uint8_t portIndex, std::string customName) {
     if (ImGui::BeginTabItem(customName == ""
                                 ? StringHelper::Sprintf("Port %d###port%d", portIndex + 1, portIndex).c_str()
                                 : customName.c_str())) {
@@ -1723,6 +1744,16 @@ void SohInputEditorWindow::DrawDebugPortTab(uint8_t portIndex, std::string custo
 
         if (ImGui::CollapsingHeader("Analog Stick", NULL, ImGuiTreeNodeFlags_DefaultOpen)) {
             DrawStickSection(portIndex, Ship::LEFT, 0);
+        }
+
+        if (ImGui::CollapsingHeader("Additional (\"Right\") Stick")) {
+            DrawStickSection(portIndex, Ship::RIGHT, 1, CHIP_COLOR_N64_YELLOW);
+        }
+
+        if (ImGui::CollapsingHeader("Camera Controls")) {
+            PopStyleHeader();
+            DrawCameraControlPanel(portIndex);
+            PushStyleHeader(THEME_COLOR);
         }
 
         PopStyleHeader();
@@ -1837,11 +1868,7 @@ void SohInputEditorWindow::DrawElement() {
     ImGui::PushStyleColor(ImGuiCol_TabActive, ImVec4(themeColor.x, themeColor.y, themeColor.z, 0.6f));
     ImGui::BeginTabBar("##ControllerConfigPortTabs");
     DrawLinkTab();
-    DrawIvanTab();
-    if (CVarGetInteger(CVAR_DEVELOPER_TOOLS("DebugEnabled"), 0)) {
-        DrawDebugPortTab(2);
-        DrawDebugPortTab(3);
-    }
+    DrawMultiplayerTabs();
     ImGui::EndTabBar();
     ImGui::PopStyleColor(3);
     ImGui::PopFont();

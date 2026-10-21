@@ -2170,7 +2170,7 @@ Color_RGB8 GetColorForControllerLED() {
             color = CVarGetColor24(CVAR_SETTING("LEDPort1Color"), { 255, 255, 255 });
         }
         if (gPlayState && (criticalOverride || source == LED_SOURCE_HEALTH)) {
-            if (HealthMeter_IsCritical()) {
+            if (HealthMeter_IsCritical(GET_PLAYER(gPlayState))) {
                 color = { 0xFF, 0, 0 };
             } else if (gSaveContext.healthCapacity != 0 && source == LED_SOURCE_HEALTH) {
                 if (gSaveContext.health / (float)gSaveContext.healthCapacity <= 0.4f) {

@@ -438,9 +438,10 @@ void Regs_InitDataImpl(void) {
     WREG(28) = 0;
     R_OW_MINIMAP_X = 238;
     R_OW_MINIMAP_Y = 164;
-    if (!CVarGetInteger(CVAR_ENHANCEMENT("RememberMapToggleState"), 0)) {
-        R_MINIMAP_DISABLED = CVarGetInteger(CVAR_ENHANCEMENT("MinimalUI"), 0);
+    if (!CVarExists(CVAR_ENHANCEMENT("ShowMinimap"))) {
+        CVarRegisterInteger(CVAR_ENHANCEMENT("ShowMinimap"), !CVarGetInteger(CVAR_ENHANCEMENT("MinimalUI"), 0));
     }
+    R_MINIMAP_DISABLED = !CVarGetInteger(CVAR_ENHANCEMENT("ShowMinimap"), 1);
     WREG(32) = 122;
     WREG(33) = 60;
     WREG(35) = 0;

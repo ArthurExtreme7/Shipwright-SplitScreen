@@ -610,7 +610,9 @@ static ActorDBInit EnPartnerInit = {
     (ActorFunc)EnPartner_Draw,
     nullptr,
 };
-extern "C" s16 gEnPartnerId;
+extern "C" {
+s16 gEnPartnerId = 0;
+}
 
 void ActorDB::AddBuiltInCustomActors() {
     gEnPartnerId = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;

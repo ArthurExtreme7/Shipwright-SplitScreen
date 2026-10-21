@@ -306,6 +306,38 @@ void EnKusa_SetupMain(EnKusa* this) {
     this->actor.flags &= ~ACTOR_FLAG_UPDATE_CULLING_DISABLED;
 }
 
+static void EnKusa_OfferCarryToNearestPlayer(EnKusa* this, Player* player, f32 playerDistSq, s16 yawToPlayer) {
+    Actor* currentInteractRangeActor;
+    f32 currentDistSq = 1.0e20f;
+    s16 yawDiff;
+    s32 absYawDiff;
+
+    if ((this == NULL) || (player == NULL)) {
+        return;
+    }
+
+    yawDiff = yawToPlayer - player->actor.world.rot.y;
+    absYawDiff = ABS(yawDiff);
+
+    if (absYawDiff < 0x6000) {
+        return;
+    }
+
+    currentInteractRangeActor = player->interactRangeActor;
+    if ((currentInteractRangeActor != NULL) && (currentInteractRangeActor->update != NULL)) {
+        f32 dx = player->actor.world.pos.x - currentInteractRangeActor->world.pos.x;
+        f32 dz = player->actor.world.pos.z - currentInteractRangeActor->world.pos.z;
+
+        currentDistSq = (dx * dx) + (dz * dz);
+    }
+
+    if ((currentInteractRangeActor == NULL) || (currentDistSq > playerDistSq)) {
+        player->getItemId = GI_NONE;
+        player->interactRangeActor = &this->actor;
+        player->getItemDirection = absYawDiff;
+    }
+}
+
 void EnKusa_Main(EnKusa* this, PlayState* play) {
     s32 pad;
 
@@ -331,18 +363,50 @@ void EnKusa_Main(EnKusa* this, PlayState* play) {
         EnKusa_SetupCut(this);
         this->actor.flags |= ACTOR_FLAG_GRASS_DESTROYED;
     } else {
-        if (!(this->collider.base.ocFlags1 & OC1_TYPE_PLAYER) && (this->actor.xzDistToPlayer > 12.0f)) {
-            this->collider.base.ocFlags1 |= OC1_TYPE_PLAYER;
+        Actor* plActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+        Player* fallbackPlayer = GET_PLAYER(play);
+        Player* nearestPlayer = NULL;
+        f32 minDistSq = 1.0e20f;
+        s16 yawTowardsNearestPlayer = 0;
+        s32 sanity = 0;
+
+        if ((fallbackPlayer != NULL) && (fallbackPlayer->actor.update != NULL)) {
+            f32 dx = this->actor.world.pos.x - fallbackPlayer->actor.world.pos.x;
+            f32 dz = this->actor.world.pos.z - fallbackPlayer->actor.world.pos.z;
+
+            minDistSq = (dx * dx) + (dz * dz);
+            nearestPlayer = fallbackPlayer;
+            yawTowardsNearestPlayer = Math_Vec3f_Yaw(&this->actor.world.pos, &fallbackPlayer->actor.world.pos);
         }
 
-        if (this->actor.xzDistToPlayer < 600.0f) {
+        while ((plActor != NULL) && (sanity < 2000)) {
+            if ((plActor->id == ACTOR_PLAYER) && (plActor->update != NULL)) {
+                f32 dx = this->actor.world.pos.x - plActor->world.pos.x;
+                f32 dz = this->actor.world.pos.z - plActor->world.pos.z;
+                f32 distSq = (dx * dx) + (dz * dz);
+
+                if (distSq < minDistSq) {
+                    minDistSq = distSq;
+                    nearestPlayer = (Player*)plActor;
+                    yawTowardsNearestPlayer = Math_Vec3f_Yaw(&this->actor.world.pos, &plActor->world.pos);
+                }
+            }
+            plActor = plActor->next;
+            sanity++;
+        }
+ 
+        if (!(this->collider.base.ocFlags1 & OC1_TYPE_PLAYER) && (minDistSq > 144.0f)) {
+            this->collider.base.ocFlags1 |= OC1_TYPE_PLAYER;
+        }
+ 
+        if (minDistSq < 360000.0f) {
             Collider_UpdateCylinder(&this->actor, &this->collider);
             CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
 
-            if (this->actor.xzDistToPlayer < 400.0f) {
+            if (minDistSq < 160000.0f) {
                 CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
-                if (this->actor.xzDistToPlayer < 100.0f) {
-                    Actor_OfferCarry(&this->actor, play);
+                if (minDistSq < 10000.0f) {
+                    EnKusa_OfferCarryToNearestPlayer(this, nearestPlayer, minDistSq, yawTowardsNearestPlayer);
                 }
             }
         }

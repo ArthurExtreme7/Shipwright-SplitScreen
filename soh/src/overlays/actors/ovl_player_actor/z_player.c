@@ -19,6 +19,7 @@
 #include "overlays/effects/ovl_Effect_Ss_Fhg_Flash/z_eff_ss_fhg_flash.h"
 #include "overlays/misc/ovl_kaleido_scope/z_kaleido_scope.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
+#include "objects/object_link_boy/object_link_boy.h"
 #include "objects/object_link_child/object_link_child.h"
 #include <soh/Enhancements/custom-message/CustomMessageTypes.h>
 #include "soh/Enhancements/item-tables/ItemTableTypes.h"
@@ -33,6 +34,7 @@
 #include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -40,6 +42,84 @@
 // Some player animations are played at this reduced speed, for reasons yet unclear.
 // This is called "adjusted" for now.
 #define PLAYER_ANIM_ADJUSTED_SPEED (2.0f / 3.0f)
+
+#define LOCAL_MP_PLAYER_COUNT_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount")
+#define LOCAL_MP_DISABLED_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.Disable")
+#define LOCAL_MP_ORIGINAL_ITEMS_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem")
+#define LOCAL_MP_RADIAL_QUICK_ITEM_MENU_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.RadialQuickItemMenu")
+#define LOCAL_MP_INDEPENDENT_SLOT_USAGE_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.IndependentSlotUsage")
+#define LOCAL_MP_SECOND_ITEM_SLOT_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SecondItemSlot")
+#define LOCAL_MP_PLAYER_CARRY_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCarry")
+#define LOCAL_MP_ELASTIC_ROPE_MODE_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.ElasticRopeMode")
+#define LOCAL_MP_ELASTIC_ROPE_STRENGTH_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.ElasticRopeStrength")
+#define LOCAL_MP_SECONDARY_AREA_LOAD_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas")
+#define LOCAL_MP_SPLITSCREEN_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen")
+
+static s32 Player_IsLocalMultiplayerEnabled(void) {
+    return !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) && (CVarGetInteger(LOCAL_MP_PLAYER_COUNT_CVAR, 2) > 1);
+}
+
+static s32 Player_IsSplitScreenEnabled(void) {
+    return Player_IsLocalMultiplayerEnabled() && CVarGetInteger(LOCAL_MP_SPLITSCREEN_CVAR, 1);
+}
+
+static const char* Player_GetCameraSettingCVar(Player* this, const char* baseCVar, char* cVarBuffer,
+                                                size_t cVarBufferSize) {
+    s32 controllerPort;
+    char legacyCVarBuffer[96];
+
+    if (!Player_IsSplitScreenEnabled() || (this == NULL) || (baseCVar == NULL) || (cVarBuffer == NULL) ||
+        (cVarBufferSize == 0)) {
+        return baseCVar;
+    }
+
+    controllerPort = this->controllerPort;
+    if ((controllerPort <= 1) || (controllerPort > 4)) {
+        return baseCVar;
+    }
+
+    snprintf(cVarBuffer, cVarBufferSize, "%s_P%d", baseCVar, controllerPort);
+    snprintf(legacyCVarBuffer, sizeof(legacyCVarBuffer), "%s.P%d", baseCVar, controllerPort);
+
+    if (CVarExists(legacyCVarBuffer)) {
+        if (!CVarExists(cVarBuffer)) {
+            CVarCopy(legacyCVarBuffer, cVarBuffer);
+        }
+
+        CVarClear(legacyCVarBuffer);
+    }
+
+    return cVarBuffer;
+}
+
+static s32 Player_GetCameraSettingInteger(Player* this, const char* baseCVar, s32 defaultValue) {
+    char cVarBuffer[96];
+
+    return CVarGetInteger(Player_GetCameraSettingCVar(this, baseCVar, cVarBuffer, sizeof(cVarBuffer)),
+                          defaultValue);
+}
+
+static f32 Player_GetCameraSettingFloat(Player* this, const char* baseCVar, f32 defaultValue) {
+    char cVarBuffer[96];
+
+    return CVarGetFloat(Player_GetCameraSettingCVar(this, baseCVar, cVarBuffer, sizeof(cVarBuffer)), defaultValue);
+}
+
+static s16* Player_GetHealthPtr(Player* this) {
+    if ((this != NULL) && this->isSecondPlayer) {
+        if (this->controllerPort == 4) {
+            return &gSaveContext.health4;
+        }
+
+        if (this->controllerPort == 3) {
+            return &gSaveContext.health3;
+        }
+
+        return &gSaveContext.health2;
+    }
+
+    return &gSaveContext.health;
+}
 
 typedef enum {
     /* 0x00 */ KNOB_ANIM_ADULT_L,
@@ -250,8 +330,8 @@ s32 Player_StartFishing(PlayState* play);
 s32 func_80852F38(PlayState* play, Player* this);
 s32 Player_TryCsAction(PlayState* play, Actor* actor, s32 csAction);
 void func_80853080(Player* this, PlayState* play);
-s32 Player_InflictDamage(PlayState* play, s32 damage);
-s32 Player_InflictDamageModified(PlayState* play, s32 damage, u8 modified);
+s32 Player_InflictDamage(PlayState* play, Player* this, s32 damage);
+s32 Player_InflictDamageModified(PlayState* play, Player* this, s32 damage, u8 modified);
 void Player_StartTalking(PlayState* play, Actor* actor);
 
 void Player_Action_80840450(Player* this, PlayState* play);
@@ -291,6 +371,7 @@ void Player_Action_80846120(Player* this, PlayState* play);
 void Player_Action_80846260(Player* this, PlayState* play);
 void Player_Action_80846358(Player* this, PlayState* play);
 void Player_Action_80846408(Player* this, PlayState* play);
+void Player_Action_CarriedByPlayer(Player* this, PlayState* play);
 void Player_Action_808464B0(Player* this, PlayState* play);
 void Player_Action_80846578(Player* this, PlayState* play);
 void Player_Action_8084B1D8(Player* this, PlayState* play);
@@ -2058,6 +2139,58 @@ void Player_AnimReplaceNormalPlayLoopAdjusted(PlayState* play, Player* this, Lin
     Player_AnimReplacePlayLoopAdjusted(play, this, anim, 0x1C);
 }
 
+static Camera* Player_GetCameraForPlayer(PlayState* play, Player* this) {
+    s32 camId;
+
+    if ((play == NULL) || (this == NULL)) {
+        return NULL;
+    }
+
+    for (camId = SUBCAM_FIRST; camId < NUM_CAMS; camId++) {
+        Camera* cam = play->cameraPtrs[camId];
+
+        if ((cam != NULL) && (cam->player == this)) {
+            return cam;
+        }
+    }
+
+    if ((play->cameraPtrs[MAIN_CAM] != NULL) && (play->cameraPtrs[MAIN_CAM]->player == this)) {
+        return play->cameraPtrs[MAIN_CAM];
+    }
+
+    return NULL;
+}
+
+static Camera* Player_GetCameraForPlayerOrMain(PlayState* play, Player* this) {
+    Camera* cam = Player_GetCameraForPlayer(play, this);
+
+    if (cam != NULL) {
+        return cam;
+    }
+
+    cam = Play_GetCamera(play, MAIN_CAM);
+
+    if ((cam != NULL) && ((cam->player == NULL) || (cam->player == this))) {
+        return cam;
+    }
+
+    return NULL;
+}
+
+static s16 Player_GetInputDirYawForPlayer(PlayState* play, Player* this) {
+    Camera* cam;
+
+    cam = Player_GetCameraForPlayer(play, this);
+    if (cam == NULL) {
+        cam = GET_ACTIVE_CAM(play);
+        if (cam == NULL) {
+            return 0;
+        }
+    }
+
+    return Camera_GetInputDirYaw(cam);
+}
+
 void Player_ProcessControlStick(PlayState* play, Player* this) {
     s8 spinAngle;
     s8 direction;
@@ -2067,7 +2200,7 @@ void Player_ProcessControlStick(PlayState* play, Player* this) {
 
     func_80077D10(&sControlStickMagnitude, &sControlStickAngle, sControlInput);
 
-    sControlStickWorldYaw = Camera_GetInputDirYaw(GET_ACTIVE_CAM(play)) + sControlStickAngle;
+    sControlStickWorldYaw = Player_GetInputDirYawForPlayer(play, this) + sControlStickAngle;
 
     this->controlStickDataIndex = (this->controlStickDataIndex + 1) % 4;
 
@@ -2478,8 +2611,275 @@ s32 Player_ItemIsItemAction(s32 item1, s32 itemAction) {
     }
 }
 
+static s32 Player_GetLocalMultiplayerPlayerCount(void) {
+    s32 playerCount;
+
+    if (CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0)) {
+        return 1;
+    }
+
+    playerCount = CVarGetInteger(LOCAL_MP_PLAYER_COUNT_CVAR, 2);
+    if (playerCount < 1) {
+        playerCount = 1;
+    } else if (playerCount > 4) {
+        playerCount = 4;
+    }
+
+    return playerCount;
+}
+
+static s32 Player_IsOriginalMultiplayerItemModeEnabled(void) {
+    return CVarGetInteger(LOCAL_MP_ORIGINAL_ITEMS_CVAR, 1) && (Player_GetLocalMultiplayerPlayerCount() > 1);
+}
+
+static s32 Player_IsCarryThrowSystemEnabled(void) {
+    return !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) &&
+           (Player_GetLocalMultiplayerPlayerCount() > 1) &&
+           CVarGetInteger(LOCAL_MP_PLAYER_CARRY_CVAR, 1);
+}
+
+static s32 Player_ShouldSuppressSecondaryInputDuringCutscene(PlayState* play, Player* this) {
+    return this->isSecondPlayer && (Player_GetLocalMultiplayerPlayerCount() > 1) &&
+           (play->csCtx.state != CS_STATE_IDLE);
+}
+
+// Returns non-zero if the given quick item is restricted by the current scene.
+// Default to not restricted to preserve pre-existing behavior when no special
+// restrictions are required.
+static s32 Player_IsItemRestrictedByScene(PlayState* play, s32 item, s32 index) {
+    (void)play;
+    (void)item;
+    (void)index;
+    return 0;
+}
+
+// Returns non-zero if the given quick item is restricted by the player's state.
+// Default to not restricted.
+static s32 Player_IsItemRestrictedByState(Player* this, s32 item, s32 index) {
+    (void)this;
+    (void)item;
+    (void)index;
+    return 0;
+}
+
+static s32 Player_IsIndependentQuickSlotUsageEnabled(void) {
+    return Player_IsOriginalMultiplayerItemModeEnabled() &&
+           CVarGetInteger(LOCAL_MP_SECOND_ITEM_SLOT_CVAR, 1) &&
+           CVarGetInteger(LOCAL_MP_INDEPENDENT_SLOT_USAGE_CVAR, 0);
+}
+
+static s32 Player_IsSecondQuickItemSlotEnabled(void) {
+    return Player_IsOriginalMultiplayerItemModeEnabled() &&
+           CVarGetInteger(LOCAL_MP_SECOND_ITEM_SLOT_CVAR, 1);
+}
+
+static s32 Player_IsRadialQuickItemMenuEnabled(void) {
+    return Player_IsOriginalMultiplayerItemModeEnabled() &&
+           CVarGetInteger(LOCAL_MP_RADIAL_QUICK_ITEM_MENU_CVAR, 0);
+}
+
+static s32 Player_GetQuickItemOnButtonForPlayer(PlayState* play, Player* this, s32 index, s32 slotIndex) {
+    u8 controllerPort;
+    s32 quickButtonIndex;
+    s32 item;
+
+    if ((index < 0) || (index >= 5)) {
+        return ITEM_NONE;
+    } else if (play->bombchuBowlingStatus != 0) {
+        return (play->bombchuBowlingStatus > 0) ? ITEM_BOMBCHU : ITEM_NONE;
+    }
+
+    if ((slotIndex < 0) || (slotIndex > 1)) {
+        slotIndex = 0;
+    }
+
+    if (index == 0) {
+        return B_BTN_ITEM;
+    }
+
+    controllerPort = this->isSecondPlayer ? this->controllerPort : 1;
+    quickButtonIndex = Interface_GetQuickItemButtonIndex(controllerPort);
+    if (index != quickButtonIndex) {
+        return ITEM_NONE;
+    }
+
+    item = Interface_GetQuickItemForPortAndSlot(controllerPort, slotIndex);
+    if (Player_IsItemRestrictedByScene(play, item, index) || Player_IsItemRestrictedByState(this, item, index)) {
+        return ITEM_NONE;
+    }
+
+    return item;
+}
+
+static s32 Player_CanCycleToItem(u8 item) {
+    if (LINK_AGE_IN_YEARS == YEARS_CHILD) {
+        switch (item) {
+            case ITEM_BOW:
+            case ITEM_ARROW_FIRE:
+            case ITEM_ARROW_ICE:
+            case ITEM_ARROW_LIGHT:
+            case ITEM_HOOKSHOT:
+            case ITEM_LONGSHOT:
+            case ITEM_HAMMER:
+            case ITEM_BOW_ARROW_FIRE:
+            case ITEM_BOW_ARROW_ICE:
+            case ITEM_BOW_ARROW_LIGHT:
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    switch (item) {
+        case ITEM_STICK:
+        case ITEM_SLINGSHOT:
+        case ITEM_BOOMERANG:
+        case ITEM_BEAN:
+            return false;
+        default:
+            return true;
+    }
+}
+
+static s32 Player_IsMultiplayerQuickMenuItemBlocked(u8 item) {
+    switch (item) {
+        case ITEM_OCARINA_FAIRY:
+        case ITEM_OCARINA_TIME:
+        case ITEM_BEAN:
+        case ITEM_LENS:
+        case ITEM_DINS_FIRE:
+        case ITEM_NAYRUS_LOVE:
+        case ITEM_FARORES_WIND:
+        case ITEM_WEIRD_EGG:
+        case ITEM_CHICKEN:
+        case ITEM_LETTER_ZELDA:
+        case ITEM_POCKET_EGG:
+        case ITEM_POCKET_CUCCO:
+        case ITEM_COJIRO:
+        case ITEM_ODD_MUSHROOM:
+        case ITEM_ODD_POTION:
+        case ITEM_SAW:
+        case ITEM_SWORD_BROKEN:
+        case ITEM_PRESCRIPTION:
+        case ITEM_FROG:
+        case ITEM_EYEDROPS:
+        case ITEM_CLAIM_CHECK:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static void Player_HandleOriginalMultiplayerItemCycle(Player* this, PlayState* play, Input* input) {
+    s32 controllerPort;
+    s32 secondSlotEnabled;
+    s32 selectedSlot;
+    s32 independentSlotUsage;
+    s32 direction;
+    s32 currentSlot;
+    s32 i;
+    s32 startSlot;
+    u8 currentItem;
+
+    if (!Player_IsOriginalMultiplayerItemModeEnabled()) {
+        return;
+    }
+
+    if (Player_InCsMode(play) || (play->pauseCtx.state != 0) || (play->transitionTrigger != TRANS_TRIGGER_OFF)) {
+        return;
+    }
+
+    controllerPort = this->isSecondPlayer ? this->controllerPort : 1;
+    secondSlotEnabled = Player_IsSecondQuickItemSlotEnabled();
+    selectedSlot = secondSlotEnabled ? Interface_GetQuickItemSelectedSlotForPort(controllerPort) : 0;
+    independentSlotUsage = Player_IsIndependentQuickSlotUsageEnabled();
+    direction = 0;
+
+    if (this->isSecondPlayer) {
+        if (!(this->inputEnabled && (this->controllerPort > 0) && (this->controllerPort <= 4))) {
+            return;
+        }
+    }
+
+    if (secondSlotEnabled) {
+        if (independentSlotUsage) {
+            if (CHECK_BTN_ALL(input->press.button, BTN_DUP)) {
+                selectedSlot = (selectedSlot == 0) ? 1 : 0;
+                Interface_SetQuickItemSelectedSlotForPort(controllerPort, selectedSlot);
+                Sfx_PlaySfxCentered(NA_SE_SY_CURSOR);
+            }
+        } else {
+            if (CHECK_BTN_ALL(input->press.button, BTN_DUP)) {
+                Interface_SetQuickItemSelectedSlotForPort(controllerPort, 0);
+                selectedSlot = 0;
+                Sfx_PlaySfxCentered(NA_SE_SY_CURSOR);
+            } else if (CHECK_BTN_ALL(input->press.button, BTN_DDOWN)) {
+                Interface_SetQuickItemSelectedSlotForPort(controllerPort, 1);
+                selectedSlot = 1;
+                Sfx_PlaySfxCentered(NA_SE_SY_CURSOR);
+            }
+        }
+    }
+
+    if (Player_IsRadialQuickItemMenuEnabled()) {
+        return;
+    }
+
+    if (CHECK_BTN_ALL(input->press.button, BTN_DLEFT)) {
+        direction = -1;
+    } else if (CHECK_BTN_ALL(input->press.button, BTN_DRIGHT)) {
+        direction = 1;
+    }
+
+    if (direction == 0) {
+        return;
+    }
+
+    currentItem = Interface_GetQuickItemForPortAndSlot(controllerPort, selectedSlot);
+    currentSlot = Interface_GetQuickItemInventorySlotForPortAndSlot(controllerPort, selectedSlot);
+
+    if ((currentSlot < 0) || (currentSlot >= 24) || (gSaveContext.inventory.items[currentSlot] != currentItem)) {
+        currentSlot = -1;
+        for (i = 0; i < 24; i++) {
+            if (gSaveContext.inventory.items[i] == currentItem) {
+                currentSlot = i;
+                break;
+            }
+        }
+    }
+
+    startSlot = (currentSlot == -1) ? 0 : currentSlot;
+    for (i = 1; i <= 24; i++) {
+        s32 checkSlot = startSlot + (direction * i);
+        u8 item;
+
+        while (checkSlot < 0) {
+            checkSlot += 24;
+        }
+        while (checkSlot >= 24) {
+            checkSlot -= 24;
+        }
+
+        item = gSaveContext.inventory.items[checkSlot];
+        if ((item != ITEM_NONE) && (item != ITEM_SOLD_OUT) && Player_CanCycleToItem(item) &&
+            (!this->isSecondPlayer || !Player_IsMultiplayerQuickMenuItemBlocked(item))) {
+            Interface_SetQuickItemForPortAndSlot(play, controllerPort, selectedSlot, item, checkSlot);
+            Sfx_PlaySfxCentered(NA_SE_SY_CURSOR);
+            break;
+        }
+    }
+}
+
 s32 Player_GetItemOnButton(PlayState* play, s32 index) {
-    if (index >= ((CVarGetInteger(CVAR_ENHANCEMENT("DpadEquips"), 0) != 0) ? 8 : 4)) {
+    s32 dpadEquipsEnabled = CVarGetInteger(CVAR_ENHANCEMENT("DpadEquips"), 0) &&
+                           !Player_IsOriginalMultiplayerItemModeEnabled();
+
+    if (index < 0) {
+        return ITEM_NONE;
+    }
+
+    if (index >= (dpadEquipsEnabled ? 8 : 4)) {
         return ITEM_NONE;
     } else if (play->bombchuBowlingStatus != 0) {
         return (play->bombchuBowlingStatus > 0) ? ITEM_BOMBCHU : ITEM_NONE;
@@ -2513,42 +2913,154 @@ s32 Player_GetItemOnButton(PlayState* play, s32 index) {
  */
 void Player_ProcessItemButtons(Player* this, PlayState* play) {
     s32 maskItemAction;
+    s32 controllerPort;
+    s32 quickButtonIndex;
+    s32 buttonItem0;
+    s32 quickItemSlot1;
+    s32 quickItemSlot2;
+    s32 quickItemModeEnabled;
+    s32 secondSlotEnabled;
+    s32 independentSlotUsage;
+    s32 quickSelectedSlot;
+    s32 quickUseSlotForL;
+    s32 lPressed;
+    s32 downPressed;
+    s32 maxItemButtons;
+    s32 buttonIndex;
     s32 item;
     s32 i;
+
+    quickItemModeEnabled = Player_IsOriginalMultiplayerItemModeEnabled();
+    controllerPort = this->isSecondPlayer ? this->controllerPort : 1;
+    quickButtonIndex = Interface_GetQuickItemButtonIndex(controllerPort);
+    buttonItem0 = Player_GetItemOnButton(play, 0);
+    secondSlotEnabled = Player_IsSecondQuickItemSlotEnabled();
+    quickItemSlot1 = quickItemModeEnabled ? Player_GetQuickItemOnButtonForPlayer(play, this, quickButtonIndex, 0)
+                                          : ITEM_NONE;
+    quickItemSlot2 = (quickItemModeEnabled && secondSlotEnabled)
+                         ? Player_GetQuickItemOnButtonForPlayer(play, this, quickButtonIndex, 1)
+                         : ITEM_NONE;
+    independentSlotUsage = Player_IsIndependentQuickSlotUsageEnabled();
+    maxItemButtons = ARRAY_COUNT(sItemButtons);
 
     if (this->currentMask != PLAYER_MASK_NONE && !CVarGetInteger(CVAR_ENHANCEMENT("PersistentMasks"), 0)) {
         maskItemAction = this->currentMask - 1 + PLAYER_IA_MASK_KEATON;
 
-        bool hasOnDpad = false;
-        if (CVarGetInteger(CVAR_ENHANCEMENT("DpadEquips"), 0) != 0) {
-            for (int buttonIndex = 0; buttonIndex < 4; buttonIndex++) {
-                hasOnDpad |= Player_ItemIsItemAction(DPAD_ITEM(buttonIndex), maskItemAction);
+        if (quickItemModeEnabled) {
+            if (!Player_ItemIsItemAction(quickItemSlot1, maskItemAction) &&
+                !Player_ItemIsItemAction(quickItemSlot2, maskItemAction)) {
+                this->currentMask = PLAYER_MASK_NONE;
             }
-        }
-        if (!Player_ItemIsItemAction(C_BTN_ITEM(0), maskItemAction) &&
-            !Player_ItemIsItemAction(C_BTN_ITEM(1), maskItemAction) &&
-            !Player_ItemIsItemAction(C_BTN_ITEM(2), maskItemAction) && !hasOnDpad) {
-            this->currentMask = PLAYER_MASK_NONE;
+        } else {
+            bool hasOnDpad = false;
+            if (CVarGetInteger(CVAR_ENHANCEMENT("DpadEquips"), 0) != 0) {
+                for (int dpadButtonIndex = 0; dpadButtonIndex < 4; dpadButtonIndex++) {
+                    hasOnDpad |= Player_ItemIsItemAction(DPAD_ITEM(dpadButtonIndex), maskItemAction);
+                }
+            }
+            if (!Player_ItemIsItemAction(C_BTN_ITEM(0), maskItemAction) &&
+                !Player_ItemIsItemAction(C_BTN_ITEM(1), maskItemAction) &&
+                !Player_ItemIsItemAction(C_BTN_ITEM(2), maskItemAction) && !hasOnDpad) {
+                this->currentMask = PLAYER_MASK_NONE;
+            }
         }
     }
 
     if (!(this->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_CUTSCENE)) && !func_8008F128(this)) {
         if (this->itemAction >= PLAYER_IA_FISHING_POLE) {
-            bool hasOnDpad = false;
-            if (CVarGetInteger(CVAR_ENHANCEMENT("DpadEquips"), 0) != 0) {
-                for (int buttonIndex = 0; buttonIndex < 4; buttonIndex++) {
-                    hasOnDpad |= Player_ItemIsInUse(this, DPAD_ITEM(buttonIndex));
+            if (quickItemModeEnabled) {
+                if (!Player_ItemIsInUse(this, buttonItem0) && !Player_ItemIsInUse(this, quickItemSlot1) &&
+                    !Player_ItemIsInUse(this, quickItemSlot2)) {
+                    Player_UseItem(play, this, ITEM_NONE);
+                    return;
                 }
-            }
-            if (!Player_ItemIsInUse(this, B_BTN_ITEM) && !Player_ItemIsInUse(this, C_BTN_ITEM(0)) &&
-                !Player_ItemIsInUse(this, C_BTN_ITEM(1)) && !Player_ItemIsInUse(this, C_BTN_ITEM(2)) && !hasOnDpad) {
-                Player_UseItem(play, this, ITEM_NONE);
-                return;
+            } else {
+                bool hasOnDpad = false;
+                if (CVarGetInteger(CVAR_ENHANCEMENT("DpadEquips"), 0) != 0) {
+                    for (int dpadButtonIndex = 0; dpadButtonIndex < 4; dpadButtonIndex++) {
+                        hasOnDpad |= Player_ItemIsInUse(this, DPAD_ITEM(dpadButtonIndex));
+                    }
+                }
+                if (!Player_ItemIsInUse(this, B_BTN_ITEM) && !Player_ItemIsInUse(this, C_BTN_ITEM(0)) &&
+                    !Player_ItemIsInUse(this, C_BTN_ITEM(1)) && !Player_ItemIsInUse(this, C_BTN_ITEM(2)) &&
+                    !hasOnDpad) {
+                    Player_UseItem(play, this, ITEM_NONE);
+                    return;
+                }
             }
         }
 
-        for (i = 0; i < ARRAY_COUNT(sItemButtons); i++) {
-            if (CHECK_BTN_ALL(sControlInput->press.button, sItemButtons[i])) {
+        if (quickItemModeEnabled) {
+            s32 mappedSlot;
+
+            quickSelectedSlot = secondSlotEnabled ? Interface_GetQuickItemSelectedSlotForPort(controllerPort) : 0;
+            quickUseSlotForL = independentSlotUsage ? 0 : quickSelectedSlot;
+            lPressed = CHECK_BTN_ALL(sControlInput->press.button, BTN_L);
+            downPressed = secondSlotEnabled && independentSlotUsage && CHECK_BTN_ALL(sControlInput->press.button, BTN_DDOWN);
+
+            i = -1;
+            mappedSlot = independentSlotUsage ? 0 : quickSelectedSlot;
+
+            if (lPressed || downPressed) {
+                i = quickButtonIndex;
+                mappedSlot = lPressed ? quickUseSlotForL : 1;
+                item = Player_GetQuickItemOnButtonForPlayer(play, this, i, mappedSlot);
+                Interface_SetQuickItemUseSlotForPort(controllerPort, mappedSlot);
+            } else {
+                for (buttonIndex = 0; buttonIndex < 4; buttonIndex++) {
+                    if (CHECK_BTN_ALL(sControlInput->press.button, sItemButtons[buttonIndex])) {
+                        i = buttonIndex;
+                        break;
+                    }
+                }
+
+                item = Player_GetQuickItemOnButtonForPlayer(play, this, i, mappedSlot);
+
+                if (i == quickButtonIndex) {
+                    Interface_SetQuickItemUseSlotForPort(controllerPort, mappedSlot);
+                }
+            }
+
+            if (item >= ITEM_NONE_FE) {
+                lPressed = CHECK_BTN_ALL(sControlInput->cur.button, BTN_L);
+                downPressed = secondSlotEnabled && independentSlotUsage && CHECK_BTN_ALL(sControlInput->cur.button, BTN_DDOWN);
+
+                if (lPressed || downPressed) {
+                    i = quickButtonIndex;
+                    mappedSlot = lPressed ? quickUseSlotForL : 1;
+                } else {
+                    i = -1;
+                    for (buttonIndex = 0; buttonIndex < 4; buttonIndex++) {
+                        if (CHECK_BTN_ALL(sControlInput->cur.button, sItemButtons[buttonIndex])) {
+                            i = buttonIndex;
+                            break;
+                        }
+                    }
+
+                    mappedSlot = independentSlotUsage ? 0 : quickSelectedSlot;
+                }
+
+                item = Player_GetQuickItemOnButtonForPlayer(play, this, i, mappedSlot);
+
+                if (i == quickButtonIndex) {
+                    Interface_SetQuickItemUseSlotForPort(controllerPort, mappedSlot);
+                }
+
+                if ((item < ITEM_NONE_FE) && (Player_ItemToItemAction(item) == this->heldItemAction)) {
+                    sHeldItemButtonIsHeldDown = true;
+                }
+            } else if (GameInteractor_Should(VB_CHANGE_HELD_ITEM_AND_USE_ITEM, true, item)) {
+                this->heldItemButton = i;
+                Player_UseItem(play, this, item);
+            }
+
+            return;
+        }
+
+        i = -1;
+        for (buttonIndex = 0; buttonIndex < maxItemButtons; buttonIndex++) {
+            if (CHECK_BTN_ALL(sControlInput->press.button, sItemButtons[buttonIndex])) {
+                i = buttonIndex;
                 break;
             }
         }
@@ -2556,8 +3068,10 @@ void Player_ProcessItemButtons(Player* this, PlayState* play) {
         item = Player_GetItemOnButton(play, i);
 
         if (item >= ITEM_NONE_FE) {
-            for (i = 0; i < ARRAY_COUNT(sItemButtons); i++) {
-                if (CHECK_BTN_ALL(sControlInput->cur.button, sItemButtons[i])) {
+            i = -1;
+            for (buttonIndex = 0; buttonIndex < maxItemButtons; buttonIndex++) {
+                if (CHECK_BTN_ALL(sControlInput->cur.button, sItemButtons[buttonIndex])) {
+                    i = buttonIndex;
                     break;
                 }
             }
@@ -2567,9 +3081,12 @@ void Player_ProcessItemButtons(Player* this, PlayState* play) {
             if ((item < ITEM_NONE_FE) && (Player_ItemToItemAction(item) == this->heldItemAction)) {
                 sHeldItemButtonIsHeldDown = true;
             }
-        } else if (GameInteractor_Should(VB_CHANGE_HELD_ITEM_AND_USE_ITEM, true, item)) {
-            this->heldItemButton = i;
-            Player_UseItem(play, this, item);
+        } else {
+            if (GameInteractor_Should(VB_CHANGE_HELD_ITEM_AND_USE_ITEM, true, item)) {
+                buttonIndex = i;
+                this->heldItemButton = buttonIndex;
+                Player_UseItem(play, this, item);
+            }
         }
     }
 }
@@ -2630,7 +3147,7 @@ void Player_UpdateItems(Player* this, PlayState* play) {
         (CVarGetInteger(CVAR_ENHANCEMENT("QuickPutaway"), 0) ||
          !(this->stateFlags1 & PLAYER_STATE1_START_CHANGING_HELD_ITEM)) &&
         ((this->heldItemAction == this->itemAction) || (this->stateFlags1 & PLAYER_STATE1_SHIELDING)) &&
-        (gSaveContext.health != 0) && (play->csCtx.state == CS_STATE_IDLE) && (this->csAction == 0) &&
+        (*Player_GetHealthPtr(this) != 0) && (play->csCtx.state == CS_STATE_IDLE) && (this->csAction == 0) &&
         (play->shootingGalleryStatus == 0) && (play->activeCamera == MAIN_CAM) &&
         (play->transitionTrigger != TRANS_TRIGGER_START) && (gSaveContext.timerState != TIMER_STATE_STOP)) {
         Player_ProcessItemButtons(this, play);
@@ -2675,7 +3192,7 @@ s32 func_8083442C(Player* this, PlayState* play) {
     s32 magicArrowType;
 
     if ((this->heldItemAction >= PLAYER_IA_BOW_FIRE) && (this->heldItemAction <= PLAYER_IA_BOW_0E) &&
-        (gSaveContext.magicState != MAGIC_STATE_IDLE)) {
+        (Magic_GetStateForPlayer(this) != MAGIC_STATE_IDLE)) {
         Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
     } else {
         Player_SetUpperActionFunc(this, func_808351D4);
@@ -2693,7 +3210,8 @@ s32 func_8083442C(Player* this, PlayState* play) {
                     if ((magicArrowType >= 0) && (magicArrowType <= 2)) {
                         if (GameInteractor_Should(VB_PLAYER_ARROW_MAGIC_CONSUMPTION, true, this, magicArrowType,
                                                   &arrowType)) {
-                            if (!Magic_RequestChange(play, sMagicArrowCosts[magicArrowType], MAGIC_CONSUME_NOW)) {
+                            if (!Magic_RequestChangeForPlayer(play, this, sMagicArrowCosts[magicArrowType],
+                                                              MAGIC_CONSUME_NOW)) {
                                 arrowType = ARROW_NORMAL;
                             }
                         }
@@ -3413,6 +3931,20 @@ void func_80835EA4(PlayState* play, s32 arg1) {
     Camera_SetCameraData(Play_GetCamera(play, 0), 4, NULL, NULL, arg1, 0, 0);
 }
 
+static void Player_SetTurnAroundCameraForPlayer(PlayState* play, Player* this, s32 arg1) {
+    Camera* playerCam = Player_GetCameraForPlayerOrMain(play, this);
+
+    if (playerCam == NULL) {
+        return;
+    }
+
+    if (func_800C0CB8(play)) {
+        Camera_ChangeSetting(playerCam, CAM_SET_TURN_AROUND);
+    }
+
+    Camera_SetCameraData(playerCam, 4, NULL, NULL, arg1, 0, 0);
+}
+
 void Player_DestroyHookshot(Player* this) {
     if (Player_HoldsHookshot(this)) {
         Actor* heldActor = this->heldActor;
@@ -3453,7 +3985,7 @@ void Player_UseItem(PlayState* play, Player* this, s32 item) {
                 Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
             } else if (itemAction == PLAYER_IA_LENS_OF_TRUTH) {
                 // Handle Lens of Truth
-                if (Magic_RequestChange(play, 0, MAGIC_CONSUME_LENS)) {
+                if (Magic_RequestChangeForPlayer(play, this, 0, MAGIC_CONSUME_LENS)) {
                     if (play->actorCtx.lensActive) {
                         Actor_DisableLens(play);
                     } else {
@@ -3473,8 +4005,10 @@ void Player_UseItem(PlayState* play, Player* this, s32 item) {
             } else if ((temp = Player_ActionToMagicSpell(this, itemAction)) >= 0) {
                 // Handle magic spells
                 if (((itemAction == PLAYER_IA_FARORES_WIND) && (gSaveContext.respawn[RESPAWN_MODE_TOP].data > 0)) ||
-                    ((gSaveContext.magicCapacity != 0) && (gSaveContext.magicState == MAGIC_STATE_IDLE) &&
-                     (gSaveContext.magic >= sMagicSpellCosts[temp]))) {
+                    ((Magic_GetLevelForPort(this->isSecondPlayer ? this->controllerPort : 1) != 0) &&
+                     (Magic_GetStateForPlayer(this) == MAGIC_STATE_IDLE) &&
+                     (Magic_GetAmountForPort(this->isSecondPlayer ? this->controllerPort : 1) >=
+                      sMagicSpellCosts[temp]))) {
                     this->itemAction = itemAction;
                     this->unk_6AD = 4;
                 } else {
@@ -3674,7 +4208,8 @@ void Player_UpdateShapeYaw(Player* this, PlayState* play) {
 
     if (!(this->stateFlags2 & (PLAYER_STATE2_DISABLE_ROTATION_Z_TARGET | PLAYER_STATE2_DISABLE_ROTATION_ALWAYS))) {
         if ((this->focusActor != NULL) &&
-            ((play->actorCtx.targetCtx.unk_4B != 0) || (this->actor.category != ACTORCAT_PLAYER))) {
+            ((play->actorCtx.targetCtx.unk_4B != 0) || (this->actor.category != ACTORCAT_PLAYER) ||
+             this->isSecondPlayer)) {
             Math_ScaledStepToS(&this->actor.shape.rot.y,
                                Math_Vec3f_Yaw(&this->actor.world.pos, &this->focusActor->focus.pos), 4000);
         } else if ((this->stateFlags1 & PLAYER_STATE1_PARALLEL) &&
@@ -3833,9 +4368,14 @@ void Player_UpdateZTargeting(Player* this, PlayState* play) {
                                       CHECK_BTN_ALL(sControlInput->press.button, BTN_Z))) {
 
                 if (this->actor.category == ACTORCAT_PLAYER) {
-                    // The next lock-on actor defaults to the actor Navi is hovering over.
-                    // This may change to the arrow hover actor below.
-                    nextLockOnActor = play->actorCtx.targetCtx.arrowPointedActor;
+                    if (this->isSecondPlayer) {
+                        // Compute lock-on candidates from this local player's own position and facing.
+                        func_80032AF0(play, &play->actorCtx, &nextLockOnActor, this);
+                    } else {
+                        // The next lock-on actor defaults to the actor Navi is hovering over.
+                        // This may change to the arrow hover actor below.
+                        nextLockOnActor = play->actorCtx.targetCtx.arrowPointedActor;
+                    }
                 } else {
                     // Dark Link will always lock onto the player.
                     nextLockOnActor = &GET_PLAYER(play)->actor;
@@ -3852,7 +4392,8 @@ void Player_UpdateZTargeting(Player* this, PlayState* play) {
                     // Navi hovers over the current lock-on actor, so `nextLockOnActor` and `focusActor`
                     // will be the same if already locked on.
                     // In this case, `nextLockOnActor` will be the arrow hover actor instead.
-                    if ((nextLockOnActor == this->focusActor) && (this->actor.category == ACTORCAT_PLAYER)) {
+                    if (!this->isSecondPlayer && (nextLockOnActor == this->focusActor) &&
+                        (this->actor.category == ACTORCAT_PLAYER)) {
                         nextLockOnActor = play->actorCtx.targetCtx.unk_94;
                     }
 
@@ -3875,7 +4416,10 @@ void Player_UpdateZTargeting(Player* this, PlayState* play) {
                     this->stateFlags1 &= ~PLAYER_STATE1_LOCK_ON_FORCED_TO_RELEASE;
                 } else {
                     // Lock-on was not started above. Set Parallel Mode.
-                    if (!(this->stateFlags1 & (PLAYER_STATE1_PARALLEL | PLAYER_STATE1_LOCK_ON_FORCED_TO_RELEASE))) {
+                    if ((this->focusActor != NULL) && !usingHoldTargeting) {
+                        Player_ReleaseLockOn(this);
+                    } else if (!(this->stateFlags1 &
+                                 (PLAYER_STATE1_PARALLEL | PLAYER_STATE1_LOCK_ON_FORCED_TO_RELEASE))) {
                         Player_SetParallel(this);
                     }
                 }
@@ -4034,7 +4578,7 @@ s32 Player_GetMovementSpeedAndYaw(Player* this, f32* outSpeedTarget, s16* outYaw
         *outYawTarget = this->actor.shape.rot.y;
 
         if (this->focusActor != NULL) {
-            if ((play->actorCtx.targetCtx.unk_4B != 0) &&
+            if (((play->actorCtx.targetCtx.unk_4B != 0) || this->isSecondPlayer) &&
                 !(this->stateFlags2 & PLAYER_STATE2_DISABLE_ROTATION_ALWAYS)) {
                 *outYawTarget = Math_Vec3f_Yaw(&this->actor.world.pos, &this->focusActor->focus.pos);
                 return false;
@@ -4045,7 +4589,7 @@ s32 Player_GetMovementSpeedAndYaw(Player* this, f32* outSpeedTarget, s16* outYaw
 
         return false;
     } else {
-        *outYawTarget += Camera_GetInputDirYaw(GET_ACTIVE_CAM(play));
+        *outYawTarget += Player_GetInputDirYawForPlayer(play, this);
         return true;
     }
 }
@@ -4510,7 +5054,7 @@ s32 func_80837B18_modified(PlayState* play, Player* this, s32 damage, u8 modifie
         modifiedDamage *= (1 << CVarGetInteger(CVAR_ENHANCEMENT("DamageMult"), 0));
     }
 
-    return Health_ChangeBy(play, modifiedDamage);
+    return Health_ChangeBy(play, modifiedDamage, this);
 }
 
 s32 func_80837B18(PlayState* play, Player* this, s32 damage) {
@@ -4735,8 +5279,8 @@ s32 func_808382DC(Player* this, PlayState* play) {
 
     if (this->unk_A86 != 0) {
         if (!Player_InBlockingCsMode(play, this)) {
-            Player_InflictDamageModified(play, -16 * (1 << CVarGetInteger(CVAR_ENHANCEMENT("VoidDamageMult"), 0)),
-                                         false);
+            Player_InflictDamageModified(play, this,
+                                         -16 * (1 << CVarGetInteger(CVAR_ENHANCEMENT("VoidDamageMult"), 0)), false);
             this->unk_A86 = 0;
         }
     } else {
@@ -5118,15 +5662,20 @@ s32 Player_HandleExitsAndVoids(PlayState* play, Player* this, CollisionPoly* pol
     s32 sp34;
     f32 speedXZ;
     s32 yaw;
+    s32 secondaryCanLoadAreas =
+        this->isSecondPlayer && (Player_GetLocalMultiplayerPlayerCount() > 1) &&
+        !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) && CVarGetInteger(LOCAL_MP_SECONDARY_AREA_LOAD_CVAR, 0);
+    s32 triggerExit;
+    s32 triggerVoidSurface;
 
-    if (this->actor.category == ACTORCAT_PLAYER) {
+    if ((this->actor.category == ACTORCAT_PLAYER) && (!this->isSecondPlayer || secondaryCanLoadAreas)) {
         exitIndex = 0;
+        triggerExit = (poly != NULL) && (exitIndex = SurfaceType_GetSceneExitIndex(&play->colCtx, poly, bgId), exitIndex != 0);
+        triggerVoidSurface = !this->isSecondPlayer && func_8083816C(sFloorType) && (this->floorProperty == 12);
 
         if (!(this->stateFlags1 & PLAYER_STATE1_DEAD) && (play->transitionTrigger == TRANS_TRIGGER_OFF) &&
             (this->csAction == 0) && !(this->stateFlags1 & PLAYER_STATE1_LOADING) &&
-            (((poly != NULL) &&
-              (exitIndex = SurfaceType_GetSceneExitIndex(&play->colCtx, poly, bgId), exitIndex != 0)) ||
-             (func_8083816C(sFloorType) && (this->floorProperty == 12)))) {
+            (triggerExit || triggerVoidSurface)) {
 
             sp34 = this->unk_A84 - (s32)this->actor.world.pos.y;
 
@@ -5277,10 +5826,16 @@ void Player_GetRelativePosition(Player* this, Vec3f* base, Vec3f* offset, Vec3f*
 
 Actor* Player_SpawnFairy(PlayState* play, Player* this, Vec3f* arg2, Vec3f* arg3, s32 type) {
     Vec3f pos;
+    Actor* fairy;
 
     Player_GetRelativePosition(this, arg2, arg3, &pos);
+    fairy = Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ELF, pos.x, pos.y, pos.z, 0, 0, 0, type);
 
-    return Actor_Spawn(&play->actorCtx, play, ACTOR_EN_ELF, pos.x, pos.y, pos.z, 0, 0, 0, type);
+    if ((fairy != NULL) && (type == FAIRY_NAVI)) {
+        fairy->parent = &this->actor;
+    }
+
+    return fairy;
 }
 
 f32 func_808396F4(PlayState* play, Player* this, Vec3f* arg2, Vec3f* arg3, CollisionPoly** arg4, s32* arg5) {
@@ -5320,6 +5875,7 @@ s32 Player_PosVsWallLineTest(PlayState* play, Player* this, Vec3f* offset, Colli
 s32 Player_ActionHandler_1(Player* this, PlayState* play) {
     DoorShutter* doorShutter;
     EnDoor* door; // Can also be DoorKiller*
+    Camera* playerCam;
     s32 doorDirection;
     f32 sp78;
     f32 sp74;
@@ -5346,6 +5902,19 @@ s32 Player_ActionHandler_1(Player* this, PlayState* play) {
             }
 
             doorDirection = this->doorDirection;
+
+            if (this->isSecondPlayer && (this->doorType != PLAYER_DOORTYPE_FAKE) &&
+                (doorActor->category == ACTORCAT_DOOR) &&
+                !CVarGetInteger(LOCAL_MP_SECONDARY_AREA_LOAD_CVAR, 0)) {
+                s32 frontRoom = play->transiActorCtx.list[(u16)doorActor->params >> 10]
+                                    .sides[(doorDirection > 0) ? 0 : 1]
+                                    .room;
+
+                if ((frontRoom >= 0) && (frontRoom != play->roomCtx.curRoom.num)) {
+                    return 0;
+                }
+            }
+
             sp78 = Math_CosS(doorActor->shape.rot.y);
             sp74 = Math_SinS(doorActor->shape.rot.y);
 
@@ -5459,12 +6028,16 @@ s32 Player_ActionHandler_1(Player* this, PlayState* play) {
                             gSaveContext.entranceSound = NA_SE_OC_DOOR_OPEN;
                         }
                     } else {
-                        Camera_ChangeDoorCam(Play_GetCamera(play, 0), doorActor,
-                                             play->transiActorCtx.list[(u16)doorActor->params >> 10]
-                                                 .sides[(doorDirection > 0) ? 0 : 1]
-                                                 .effects,
-                                             0, 38.0f * sInvWaterSpeedFactor, 26.0f * sInvWaterSpeedFactor,
-                                             10.0f * sInvWaterSpeedFactor);
+                        playerCam = Player_GetCameraForPlayerOrMain(play, this);
+
+                        if (playerCam != NULL) {
+                            Camera_ChangeDoorCam(playerCam, doorActor,
+                                                 play->transiActorCtx.list[(u16)doorActor->params >> 10]
+                                                     .sides[(doorDirection > 0) ? 0 : 1]
+                                                     .effects,
+                                                 0, 38.0f * sInvWaterSpeedFactor, 26.0f * sInvWaterSpeedFactor,
+                                                 10.0f * sInvWaterSpeedFactor);
+                        }
                     }
                 }
             }
@@ -5482,6 +6055,10 @@ s32 Player_ActionHandler_1(Player* this, PlayState* play) {
 
             if (((attachedActor = doorActor->child) != NULL) || ((attachedActor = doorActor->parent) != NULL)) {
                 attachedActor->room = play->roomCtx.curRoom.num;
+            }
+
+            if ((this->doorType != PLAYER_DOORTYPE_FAKE) && (play->roomCtx.curRoom.num >= 0)) {
+                this->actor.room = play->roomCtx.curRoom.num;
             }
 
             return 1;
@@ -5554,6 +6131,403 @@ void func_8083A098(Player* this, LinkAnimationHeader* anim, PlayState* play) {
 
 int func_8083A0D4(Player* this) {
     return (this->interactRangeActor != NULL) && (this->heldActor == NULL);
+}
+
+static Player* Player_GetCarrier(Player* this) {
+    Actor* parent = this->actor.parent;
+
+    if ((parent != NULL) && (parent->id == ACTOR_PLAYER) && (((Player*)parent)->heldActor == &this->actor)) {
+        return (Player*)parent;
+    }
+
+    return NULL;
+}
+
+static s32 Player_IsElasticRopeModeEnabled(void) {
+    return !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) &&
+           (Player_GetLocalMultiplayerPlayerCount() > 1) &&
+           CVarGetInteger(LOCAL_MP_ELASTIC_ROPE_MODE_CVAR, 0);
+}
+
+static s32 Player_CanElasticRopeAffect(Player* this) {
+    if ((this == NULL) || (this->actor.id != ACTOR_PLAYER) || (this->actor.update == NULL)) {
+        return false;
+    }
+
+    if ((Player_GetCarrier(this) != NULL) || (this->heldActor != NULL) || (this->actor.parent != NULL)) {
+        return false;
+    }
+
+    if (this->stateFlags1 &
+        (PLAYER_STATE1_DEAD | PLAYER_STATE1_LOADING | PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_IN_CUTSCENE |
+         PLAYER_STATE1_TALKING | PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_FIRST_PERSON)) {
+        return false;
+    }
+
+    if (this->stateFlags2 &
+        (PLAYER_STATE2_PAUSE_MOST_UPDATING | PLAYER_STATE2_UNDERWATER | PLAYER_STATE2_GRABBED_BY_ENEMY |
+         PLAYER_STATE2_FROZEN)) {
+        return false;
+    }
+
+    return true;
+}
+
+static s32 Player_CanElasticRopeRender(Player* this) {
+    if ((this == NULL) || (this->actor.id != ACTOR_PLAYER) || (this->actor.update == NULL)) {
+        return false;
+    }
+
+    if ((Player_GetCarrier(this) != NULL) || (this->heldActor != NULL) || (this->actor.parent != NULL)) {
+        return false;
+    }
+
+    if (this->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_LOADING)) {
+        return false;
+    }
+
+    if (this->stateFlags2 & PLAYER_STATE2_PAUSE_MOST_UPDATING) {
+        return false;
+    }
+
+    return true;
+}
+
+static f32 Player_GetElasticRopeStrength(void) {
+    f32 ropeStrength = CVarGetFloat(LOCAL_MP_ELASTIC_ROPE_STRENGTH_CVAR, 1.0f);
+
+    return CLAMP(ropeStrength, 0.25f, 3.0f);
+}
+
+static f32 Player_GetElasticRopeAnchorYOffset(Player* this) {
+    if (this == NULL) {
+        return 0.0f;
+    }
+
+    return LINK_IS_ADULT ? 34.0f : 22.0f;
+}
+
+static Vec3f Player_GetElasticRopeAnchorPos(Player* this) {
+    Vec3f anchor = { 0.0f, 0.0f, 0.0f };
+
+    if (this == NULL) {
+        return anchor;
+    }
+
+    anchor = this->actor.world.pos;
+    anchor.y += Player_GetElasticRopeAnchorYOffset(this);
+    return anchor;
+}
+
+static s32 Player_GetElasticRopeTarget(Player* this, PlayState* play, Vec3f* outTarget, Player** outOtherPlayer,
+                                       s32* outParticipantCount, s32 canAffectPredicate(Player*)) {
+    Actor* actor;
+    Player* otherPlayer = NULL;
+    Vec3f center = { 0.0f, 0.0f, 0.0f };
+    s32 participantCount = 0;
+
+    if ((play == NULL) || (this == NULL) || !canAffectPredicate(this)) {
+        return false;
+    }
+
+    actor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    while (actor != NULL) {
+        if ((actor->id == ACTOR_PLAYER) && (actor->update != NULL)) {
+            Player* player = (Player*)actor;
+
+            if (canAffectPredicate(player)) {
+                Vec3f playerAnchorPos = Player_GetElasticRopeAnchorPos(player);
+
+                participantCount++;
+                center.x += playerAnchorPos.x;
+                center.y += playerAnchorPos.y;
+                center.z += playerAnchorPos.z;
+
+                if (player != this) {
+                    otherPlayer = player;
+                }
+            }
+        }
+
+        actor = actor->next;
+    }
+
+    if (outOtherPlayer != NULL) {
+        *outOtherPlayer = otherPlayer;
+    }
+
+    if (outParticipantCount != NULL) {
+        *outParticipantCount = participantCount;
+    }
+
+    if ((participantCount <= 1) || (outTarget == NULL)) {
+        return false;
+    }
+
+    if ((participantCount == 2) && (otherPlayer != NULL)) {
+        *outTarget = Player_GetElasticRopeAnchorPos(otherPlayer);
+    } else {
+        center.x /= participantCount;
+        center.y /= participantCount;
+        center.z /= participantCount;
+        *outTarget = center;
+    }
+
+    return true;
+}
+
+static void Player_DrawElasticRopeChainSegment(PlayState* play, Vec3f* fromPos, Vec3f* toPos, f32 ropeStrength) {
+    Vec3f ropeVec;
+    f32 xzDist;
+    f32 ropeDist;
+    f32 ropeThickness;
+
+    if ((play == NULL) || (fromPos == NULL) || (toPos == NULL)) {
+        return;
+    }
+
+    ropeVec.x = toPos->x - fromPos->x;
+    ropeVec.y = toPos->y - fromPos->y;
+    ropeVec.z = toPos->z - fromPos->z;
+
+    xzDist = sqrtf(SQ(ropeVec.x) + SQ(ropeVec.z));
+    ropeDist = sqrtf(SQ(ropeVec.y) + SQ(xzDist));
+    if (ropeDist <= 1.0f) {
+        return;
+    }
+
+    ropeThickness = CLAMP(0.010f + (ropeStrength * 0.0025f), 0.008f, 0.018f);
+
+    OPEN_DISPS(play->state.gfxCtx);
+
+    Matrix_Push();
+    Matrix_Translate(fromPos->x, fromPos->y, fromPos->z, MTXMODE_NEW);
+    Matrix_RotateY(Math_FAtan2F(ropeVec.x, ropeVec.z), MTXMODE_APPLY);
+    Matrix_RotateX(Math_FAtan2F(-ropeVec.y, xzDist), MTXMODE_APPLY);
+    Matrix_Scale(ropeThickness, ropeThickness, ropeDist * 0.01f, MTXMODE_APPLY);
+    gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(POLY_OPA_DISP++, gLinkAdultHookshotChainDL);
+    Matrix_Pop();
+
+    CLOSE_DISPS(play->state.gfxCtx);
+}
+
+static void Player_DrawElasticRope(Player* this, PlayState* play) {
+    Player* otherPlayer = NULL;
+    Vec3f targetPos;
+    Vec3f ropeStart;
+    Vec3f ropeEnd;
+    f32 ropeStrength;
+    s32 participantCount = 0;
+
+    if ((play == NULL) || !Player_IsElasticRopeModeEnabled() || !Player_CanElasticRopeRender(this)) {
+        return;
+    }
+
+    if (!Player_GetElasticRopeTarget(this, play, &targetPos, &otherPlayer, &participantCount,
+                                     Player_CanElasticRopeRender)) {
+        return;
+    }
+
+    if ((participantCount == 2) && (otherPlayer != NULL) && (this->controllerPort > otherPlayer->controllerPort)) {
+        return;
+    }
+
+    ropeStrength = Player_GetElasticRopeStrength();
+    ropeStart = Player_GetElasticRopeAnchorPos(this);
+    ropeEnd = targetPos;
+
+    Gfx_SetupDL_25Opa(play->state.gfxCtx);
+    Player_DrawElasticRopeChainSegment(play, &ropeStart, &ropeEnd, ropeStrength);
+}
+
+static void Player_ApplyElasticRopePull(Player* this, PlayState* play) {
+    Vec3f targetPos;
+    f32 dx;
+    f32 dy;
+    f32 dz;
+    f32 distSq;
+    f32 dist;
+    const f32 baseRopeSlackDist = 160.0f;
+    const f32 baseRopeHardLimit = 360.0f;
+    const f32 pullLinearScale = 0.018f;
+    const f32 pullQuadraticScale = 0.00020f;
+    const f32 maxBasePull = 6.0f;
+    f32 ropeStrength;
+    f32 distanceAllowanceScale;
+    f32 ropeSlackDist;
+    f32 ropeHardLimit;
+
+    if ((play == NULL) || !Player_IsElasticRopeModeEnabled() || !Player_CanElasticRopeAffect(this)) {
+        return;
+    }
+
+    if (!Player_GetElasticRopeTarget(this, play, &targetPos, NULL, NULL, Player_CanElasticRopeAffect)) {
+        return;
+    }
+
+    ropeStrength = Player_GetElasticRopeStrength();
+    distanceAllowanceScale = 1.0f / ropeStrength;
+    ropeSlackDist = baseRopeSlackDist * distanceAllowanceScale;
+    ropeHardLimit = baseRopeHardLimit * distanceAllowanceScale;
+
+    dx = targetPos.x - this->actor.world.pos.x;
+    dy = targetPos.y - this->actor.world.pos.y;
+    dz = targetPos.z - this->actor.world.pos.z;
+    distSq = SQ(dx) + SQ(dy) + SQ(dz);
+
+    if (distSq < 1.0f) {
+        return;
+    }
+
+    dist = sqrtf(distSq);
+
+    if (dist > ropeSlackDist) {
+        f32 stretch = dist - ropeSlackDist;
+        f32 pullStrength = (stretch * pullLinearScale) + (SQ(stretch) * pullQuadraticScale);
+        f32 invDist = 1.0f / dist;
+
+        pullStrength *= ropeStrength;
+        pullStrength = CLAMP(pullStrength, 0.0f, maxBasePull * ropeStrength);
+        this->actor.velocity.x += dx * invDist * pullStrength;
+        this->actor.velocity.y += dy * invDist * pullStrength;
+        this->actor.velocity.z += dz * invDist * pullStrength;
+    }
+
+    if (dist > ropeHardLimit) {
+        f32 invDist = 1.0f / dist;
+        f32 overflow = dist - ropeHardLimit;
+        f32 awayX = -dx * invDist;
+        f32 awayY = -dy * invDist;
+        f32 awayZ = -dz * invDist;
+        f32 outwardVelocity =
+            (this->actor.velocity.x * awayX) + (this->actor.velocity.y * awayY) + (this->actor.velocity.z * awayZ);
+        f32 stopFactor = 1.0f + CLAMP(overflow * (0.02f * ropeStrength), 0.0f, 2.5f);
+        f32 inwardSnap = CLAMP(overflow * (0.05f * ropeStrength), 0.0f, 8.0f * ropeStrength);
+
+        if (outwardVelocity > 0.0f) {
+            this->actor.velocity.x -= awayX * outwardVelocity * stopFactor;
+            this->actor.velocity.y -= awayY * outwardVelocity * stopFactor;
+            this->actor.velocity.z -= awayZ * outwardVelocity * stopFactor;
+        }
+
+        this->actor.velocity.x += dx * invDist * inwardSnap;
+        this->actor.velocity.y += dy * invDist * inwardSnap;
+        this->actor.velocity.z += dz * invDist * inwardSnap;
+    }
+}
+
+static s32 Player_CanPickupPlayer(Player* this, Player* target, s32 requireStillInput) {
+    s16 yawDiff;
+
+    if (!Player_IsCarryThrowSystemEnabled()) {
+        return false;
+    }
+
+    if ((target == NULL) || (target == this) || (target->actor.update == NULL)) {
+        return false;
+    }
+
+    if ((Player_GetCarrier(this) != NULL) || (Player_GetCarrier(target) != NULL) || (this->actor.parent != NULL) ||
+        (target->actor.parent != NULL) || (this->heldActor != NULL) || (target->heldActor != NULL)) {
+        return false;
+    }
+
+    if ((this->stateFlags1 &
+         (PLAYER_STATE1_DEAD | PLAYER_STATE1_CHARGING_SPIN_ATTACK | PLAYER_STATE1_HANGING_OFF_LEDGE |
+          PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_JUMPING | PLAYER_STATE1_FREEFALL |
+          PLAYER_STATE1_FIRST_PERSON | PLAYER_STATE1_CLIMBING_LADDER | PLAYER_STATE1_TALKING |
+          PLAYER_STATE1_IN_CUTSCENE | PLAYER_STATE1_CARRYING_ACTOR)) ||
+        (target->stateFlags1 &
+         (PLAYER_STATE1_DEAD | PLAYER_STATE1_CHARGING_SPIN_ATTACK | PLAYER_STATE1_HANGING_OFF_LEDGE |
+          PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_JUMPING | PLAYER_STATE1_FREEFALL |
+          PLAYER_STATE1_FIRST_PERSON | PLAYER_STATE1_CLIMBING_LADDER | PLAYER_STATE1_TALKING |
+          PLAYER_STATE1_IN_CUTSCENE | PLAYER_STATE1_CARRYING_ACTOR))) {
+        return false;
+    }
+
+    if ((this->stateFlags2 & PLAYER_STATE2_UNDERWATER) || (target->stateFlags2 & PLAYER_STATE2_UNDERWATER) ||
+        (Player_GetExplosiveHeld(this) >= 0) || (Player_GetExplosiveHeld(target) >= 0)) {
+        return false;
+    }
+
+    if (!(this->actor.bgCheckFlags & 1) || !(target->actor.bgCheckFlags & 1) ||
+        (fabsf(this->linearVelocity) >= 0.1f) || (fabsf(target->linearVelocity) >= 0.1f) ||
+        (SQ(this->actor.world.pos.x - target->actor.world.pos.x) +
+         SQ(this->actor.world.pos.z - target->actor.world.pos.z) >= SQ(50.0f)) ||
+        (fabsf(this->actor.world.pos.y - target->actor.world.pos.y) >= 10.0f)) {
+        return false;
+    }
+
+    yawDiff = Math_Vec3f_Yaw(&this->actor.world.pos, &target->actor.world.pos) - this->actor.shape.rot.y;
+    if (ABS(yawDiff) >= 0x3000) {
+        return false;
+    }
+
+    if (requireStillInput &&
+        ((sControlInput == NULL) || (ABS(sControlInput->rel.stick_x) >= 10) || (ABS(sControlInput->rel.stick_y) >= 10))) {
+        return false;
+    }
+
+    return true;
+}
+
+static void Player_OfferCarryToOtherPlayers(Player* this, PlayState* play) {
+    Actor* actor;
+    Player* closestPlayer = NULL;
+    s16 closestYawDiff = 0;
+    f32 closestDistSq = SQ(50.0f);
+
+    if (!Player_IsCarryThrowSystemEnabled()) {
+        return;
+    }
+
+    if (Player_InCsMode(play) || (play->pauseCtx.state != 0) || (play->transitionTrigger != TRANS_TRIGGER_OFF) ||
+        (Player_GetCarrier(this) != NULL) || (this->heldActor != NULL) ||
+        (this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) || (this->stateFlags2 & PLAYER_STATE2_UNDERWATER)) {
+        return;
+    }
+
+    actor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    while (actor != NULL) {
+        if ((actor != &this->actor) && (actor->id == ACTOR_PLAYER) && (actor->update != NULL)) {
+            Player* other = (Player*)actor;
+            f32 distSq;
+
+            if (Player_CanPickupPlayer(other, this, false)) {
+                f32 dx = other->actor.world.pos.x - this->actor.world.pos.x;
+                f32 dz = other->actor.world.pos.z - this->actor.world.pos.z;
+
+                distSq = (dx * dx) + (dz * dz);
+                if (distSq < closestDistSq) {
+                    closestPlayer = other;
+                    closestYawDiff = Math_Vec3f_Yaw(&other->actor.world.pos, &this->actor.world.pos) -
+                                     other->actor.shape.rot.y;
+                    closestDistSq = distSq;
+                }
+            }
+        }
+
+        actor = actor->next;
+    }
+
+    if (closestPlayer != NULL) {
+        Actor* currentInteractRangeActor = closestPlayer->interactRangeActor;
+        f32 currentDistSq = FLT_MAX;
+
+        if ((currentInteractRangeActor != NULL) && (currentInteractRangeActor->update != NULL)) {
+            f32 dx = closestPlayer->actor.world.pos.x - currentInteractRangeActor->world.pos.x;
+            f32 dz = closestPlayer->actor.world.pos.z - currentInteractRangeActor->world.pos.z;
+
+            currentDistSq = (dx * dx) + (dz * dz);
+        }
+
+        if ((currentInteractRangeActor == NULL) || (currentDistSq > closestDistSq)) {
+            closestPlayer->getItemId = GI_NONE;
+            closestPlayer->interactRangeActor = &this->actor;
+            closestPlayer->getItemDirection = ABS(closestYawDiff);
+        }
+    }
 }
 
 void func_8083A0F4(PlayState* play, Player* this) {
@@ -5850,6 +6824,7 @@ void func_8083AA10(Player* this, PlayState* play) {
 
 s32 func_8083AD4C(PlayState* play, Player* this) {
     s32 camMode;
+    Camera* playerCam;
 
     if (this->unk_6AD == 2) {
         if (func_8002DD6C(this)) {
@@ -5874,7 +6849,12 @@ s32 func_8083AD4C(PlayState* play, Player* this) {
         camMode = CAM_MODE_FIRSTPERSON;
     }
 
-    return Camera_ChangeMode(Play_GetCamera(play, 0), camMode);
+    playerCam = Player_GetCameraForPlayerOrMain(play, this);
+    if (playerCam == NULL) {
+        return false;
+    }
+
+    return Camera_ChangeMode(playerCam, camMode);
 }
 
 /**
@@ -5930,7 +6910,7 @@ void func_8083AF44(PlayState* play, Player* this, s32 magicSpell) {
     //! When `MAGIC_STATE_CONSUME_SETUP` is set in `Player_Action_808507F4`, magic will eventually be
     //! consumed to a stale target value. If that stale target value is higher than the current
     //! magic value, it will be consumed to zero.
-    Magic_RequestChange(play, sMagicSpellCosts[magicSpell], MAGIC_CONSUME_WAIT_PREVIEW);
+    Magic_RequestChangeForPlayer(play, this, sMagicSpellCosts[magicSpell], MAGIC_CONSUME_WAIT_PREVIEW);
 
     u8 isFastFarores = CVarGetInteger(CVAR_ENHANCEMENT("FastFarores"), 0) && this->itemAction == PLAYER_IA_FARORES_WIND;
 
@@ -6040,8 +7020,13 @@ s32 Player_ActionHandler_13(Player* this, PlayState* play) {
                             func_8083AE40(this, giEntry.objectId);
                         }
 
-                        this->stateFlags1 |=
-                            PLAYER_STATE1_TALKING | PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE;
+                        // Only set cutscene flags in single-player mode; in MP, skip to prevent UI/split-screen disable
+                        if (Player_GetLocalMultiplayerPlayerCount() <= 1) {
+                            this->stateFlags1 |=
+                                PLAYER_STATE1_TALKING | PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE;
+                        } else {
+                            this->stateFlags1 |= PLAYER_STATE1_TALKING;
+                        }
 
                         if (sp2C >= 0) {
                             sp2C = sp2C + 1;
@@ -6070,11 +7055,11 @@ s32 Player_ActionHandler_13(Player* this, PlayState* play) {
                         } else if (sp2C == EXCH_ITEM_LETTER_RUTO) {
                             this->av1.actionVar1 = 1;
                             this->actor.textId = 0x4005;
-                            func_80835EA4(play, 1);
+                            Player_SetTurnAroundCameraForPlayer(play, this, 1);
                         } else {
                             this->av1.actionVar1 = 2;
                             this->actor.textId = 0xCF;
-                            func_80835EA4(play, 4);
+                            Player_SetTurnAroundCameraForPlayer(play, this, 4);
                         }
 
                         this->actor.flags |= ACTOR_FLAG_TALK;
@@ -6097,15 +7082,15 @@ s32 Player_ActionHandler_13(Player* this, PlayState* play) {
                     if (sp2C == 0xC) {
                         Player_SetupActionPreserveItemAction(play, this, Player_Action_8084EED8, 0);
                         Player_AnimPlayOnceAdjusted(play, this, &gPlayerAnim_link_bottle_bug_out);
-                        func_80835EA4(play, 3);
+                        Player_SetTurnAroundCameraForPlayer(play, this, 3);
                     } else if ((sp2C > 0) && (sp2C < 4)) {
                         Player_SetupActionPreserveItemAction(play, this, Player_Action_8084EFC0, 0);
                         Player_AnimPlayOnceAdjusted(play, this, &gPlayerAnim_link_bottle_fish_out);
-                        func_80835EA4(play, (sp2C == 1) ? 1 : 5);
+                        Player_SetTurnAroundCameraForPlayer(play, this, (sp2C == 1) ? 1 : 5);
                     } else {
                         Player_SetupActionPreserveItemAction(play, this, Player_Action_8084EAC0, 0);
                         Player_AnimChangeOnceMorphAdjusted(play, this, &gPlayerAnim_link_bottle_drink_demo_start);
-                        func_80835EA4(play, 2);
+                        Player_SetTurnAroundCameraForPlayer(play, this, 2);
                     }
                 } else {
                     Player_SetupActionPreserveItemAction(play, this, Player_Action_8084E3C4, 0);
@@ -6133,7 +7118,10 @@ s32 Player_ActionHandler_13(Player* this, PlayState* play) {
                 return 0;
             }
 
-            this->stateFlags1 |= PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE;
+            // Only set cutscene flags in single-player mode; in MP, skip to prevent UI/split-screen disable
+            if (Player_GetLocalMultiplayerPlayerCount() <= 1) {
+                this->stateFlags1 |= PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE;
+            }
         }
 
         func_80832224(this);
@@ -7287,10 +8275,14 @@ void func_8083E4C4(PlayState* play, Player* this, GetItemEntry* giEntry) {
         Item_DropCollectible(play, &this->actor.world.pos, dropType | 0x8000);
         if ((dropType != 4) && (dropType != 8) && (dropType != 9) && (dropType != 0xA) && (dropType != 0) &&
             (dropType != 1) && (dropType != 2) && (dropType != 0x14) && (dropType != 0x13)) {
+            Item_Give_SetPlayer(this);
             Item_Give(play, giEntry->itemId);
+            Item_Give_ClearPlayer();
         }
     } else {
+        Item_Give_SetPlayer(this);
         Item_Give(play, giEntry->itemId);
+        Item_Give_ClearPlayer();
     }
     Sfx_PlaySfxCentered((this->getItemId < 0 || this->getItemEntry.getItemId < 0) ? NA_SE_SY_GET_BOXITEM
                                                                                   : NA_SE_SY_GET_ITEM);
@@ -7456,6 +8448,11 @@ s32 Player_ActionHandler_2(Player* this, PlayState* play) {
 
                     if ((interactedActor->id == ACTOR_EN_ISHI) && ((interactedActor->params & 0xF) == 1) &&
                         (strength < PLAYER_STR_SILVER_G)) {
+                        return 0;
+                    }
+
+                    if ((interactedActor->id == ACTOR_PLAYER) &&
+                        !Player_CanPickupPlayer(this, (Player*)interactedActor, true)) {
                         return 0;
                     }
 
@@ -7641,6 +8638,13 @@ s32 Player_TryEnteringCrawlspace(Player* this, PlayState* play, u32 interactWall
         }
 
         wallPoly = this->actor.wallPoly;
+
+        // In local multiplayer, shared wall-touch state can be stale across players.
+        // Guard against null wall data before dereferencing crawlspace geometry.
+        if (wallPoly == NULL) {
+            return false;
+        }
+
         CollisionPoly_GetVerticesByBgId(wallPoly, this->actor.wallBgId, &play->colCtx, wallVertices);
 
         // Determines min and max vertices for x & z (edges of the crawlspace hole)
@@ -7781,7 +8785,9 @@ s32 Player_TryLeavingCrawlspace(Player* this, PlayState* play) {
                     this->actor.shape.rot.y = this->actor.wallYaw + 0x8000;
                     Player_AnimPlayOnce(play, this, &gPlayerAnim_link_child_tunnel_end);
                     Player_StartAnimMovement(play, this, 0x9D);
-                    OnePointCutscene_Init(play, 9601, 999, NULL, MAIN_CAM);
+                    if (!this->isSecondPlayer) {
+                        OnePointCutscene_Init(play, 9601, 999, NULL, MAIN_CAM);
+                    }
                 } else {
                     // Leaving a crawlspace backwards
                     this->actor.shape.rot.y = this->actor.wallYaw;
@@ -7789,7 +8795,9 @@ s32 Player_TryLeavingCrawlspace(Player* this, PlayState* play) {
                                          Animation_GetLastFrame(&gPlayerAnim_link_child_tunnel_start), 0.0f,
                                          ANIMMODE_ONCE, 0.0f);
                     Player_StartAnimMovement(play, this, 0x9D);
-                    OnePointCutscene_Init(play, 9602, 999, NULL, MAIN_CAM);
+                    if (!this->isSecondPlayer) {
+                        OnePointCutscene_Init(play, 9602, 999, NULL, MAIN_CAM);
+                    }
                 }
             }
 
@@ -7954,8 +8962,8 @@ s32 func_8083FD78(Player* this, f32* arg1, s16* arg2, PlayState* play) {
         }
 
         // #region SOH [Enhancement]
-        if (CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0) ||
-            !CVarGetInteger(CVAR_SETTING("Controls.InvertZAimingYAxis"), 1)) {
+        if (Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.RightStickAim"), 0) ||
+            !Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.InvertZAimingYAxis"), 1)) {
 
             if (this->focusActor != NULL) {
                 func_8083DB98(this, 1);
@@ -7963,7 +8971,7 @@ s32 func_8083FD78(Player* this, f32* arg1, s16* arg2, PlayState* play) {
                 int8_t relStickY;
 
                 // preserves simultaneous left/right-stick aiming
-                if (CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0)) {
+                if (Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.RightStickAim"), 0)) {
                     if ((sControlInput->rel.stick_y + sControlInput->rel.right_stick_y) >= 0) {
                         relStickY = (((sControlInput->rel.stick_y) > (sControlInput->rel.right_stick_y))
                                          ? (sControlInput->rel.stick_y)
@@ -7979,7 +8987,11 @@ s32 func_8083FD78(Player* this, f32* arg1, s16* arg2, PlayState* play) {
 
                 Math_SmoothStepToS(
                     &this->actor.focus.rot.x,
-                    relStickY * (CVarGetInteger(CVAR_SETTING("Controls.InvertZAimingYAxis"), 1) ? 1 : -1) * 240.0f, 14,
+                    relStickY *
+                        (Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.InvertZAimingYAxis"), 1) ? 1 :
+                                                                                                                  -1) *
+                        240.0f,
+                    14,
                     4000, 30);
                 func_80836AB8(this, 1);
             }
@@ -8030,7 +9042,7 @@ s32 func_80840058(Player* this, f32* arg1, s16* arg2, PlayState* play) {
     func_8083DC54(this, play);
 
     if ((*arg1 != 0.0f) || (ABS(this->unk_87C) > 400)) {
-        s16 temp1 = *arg2 - (u16)Camera_GetInputDirYaw(GET_ACTIVE_CAM(play));
+        s16 temp1 = *arg2 - (u16)Player_GetInputDirYawForPlayer(play, this);
         u16 temp2 = (ABS(temp1) - 0x2000);
 
         if ((temp2 < 0x4000) || (this->unk_87C != 0)) {
@@ -8265,7 +9277,7 @@ void Player_ChooseNextIdleAnim(PlayState* play, Player* this) {
     s32 commonType;
 
     if ((this->focusActor != NULL) ||
-        (!(heathIsCritical = HealthMeter_IsCritical()) && ((this->idleType = (this->idleType + 1) & 1) != 0))) {
+        (!(heathIsCritical = HealthMeter_IsCritical(this)) && ((this->idleType = (this->idleType + 1) & 1) != 0))) {
         this->stateFlags2 &= ~PLAYER_STATE2_IDLE_FIDGET;
         anim = Player_GetIdleAnim(this);
     } else {
@@ -9085,7 +10097,14 @@ s32 func_80842964(Player* this, PlayState* play) {
 }
 
 void Player_RequestQuake(PlayState* play, s32 speed, s32 y, s32 countdown) {
-    s32 quakeIndex = Quake_Add(Play_GetCamera(play, 0), 3);
+    Camera* camera = Camera_ResolvePlayerActionCamera(Play_GetCamera(play, MAIN_CAM));
+    s32 quakeIndex;
+
+    if (camera == NULL) {
+        return;
+    }
+
+    quakeIndex = Quake_Add(camera, 3);
 
     Quake_SetSpeed(quakeIndex, speed);
     Quake_SetQuakeValues(quakeIndex, y, 0, 0, 0);
@@ -9291,11 +10310,11 @@ void Player_Action_80843188(Player* this, PlayState* play) {
         s16 sp46;
         f32 sp40;
 
-        sp54 = sControlInput->rel.stick_y * 100 *
-               (CVarGetInteger(CVAR_SETTING("Controls.InvertShieldAimingYAxis"), 1) ? 1 : -1);
+         sp54 = sControlInput->rel.stick_y * 100 *
+             (Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.InvertShieldAimingYAxis"), 1) ? 1 : -1);
         sp50 = sControlInput->rel.stick_x * (CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0) ? 120 : -120) *
-               (CVarGetInteger(CVAR_SETTING("Controls.InvertShieldAimingXAxis"), 0) ? -1 : 1);
-        sp4E = this->actor.shape.rot.y - Camera_GetInputDirYaw(GET_ACTIVE_CAM(play));
+             (Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.InvertShieldAimingXAxis"), 0) ? -1 : 1);
+        sp4E = this->actor.shape.rot.y - Player_GetInputDirYawForPlayer(play, this);
         GameInteractor_ExecuteOnPlayerShieldControl(&sp50, &sp54);
 
         sp40 = Math_CosS(sp4E);
@@ -9509,10 +10528,14 @@ void func_80843AE8(PlayState* play, Player* this) {
                     LinkAnimation_Change(play, &this->skelAnime, &gPlayerAnim_link_derth_rebirth, 1.0f, 99.0f,
                                          Animation_GetLastFrame(&gPlayerAnim_link_derth_rebirth), ANIMMODE_ONCE, 0.0f);
                 }
-                gSaveContext.healthAccumulator = MAX_HEALTH;
+                if (this->isSecondPlayer) {
+                    Health_ChangeBy(play, MAX_HEALTH, this);
+                } else {
+                    gSaveContext.healthAccumulator = MAX_HEALTH;
+                }
                 this->av2.actionVar2 = -1;
             }
-        } else if (gSaveContext.healthAccumulator == 0) {
+        } else if (this->isSecondPlayer || (gSaveContext.healthAccumulator == 0)) {
             this->stateFlags1 &= ~PLAYER_STATE1_DEAD;
             if (this->stateFlags1 & PLAYER_STATE1_IN_WATER) {
                 func_80838F18(play, this);
@@ -9613,7 +10636,8 @@ s32 func_80843E64(PlayState* play, Player* this) {
         impactInfo = &D_80854600[impactIndex];
 
         if (Player_InflictDamageModified(
-                play, impactInfo->damage * (1 << CVarGetInteger(CVAR_ENHANCEMENT("FallDamageMult"), 0)), false)) {
+            play, this, impactInfo->damage * (1 << CVarGetInteger(CVAR_ENHANCEMENT("FallDamageMult"), 0)),
+            false)) {
             return -1;
         }
 
@@ -9654,6 +10678,30 @@ void func_8084409C(PlayState* play, Player* this, f32 speedXZ, f32 velocityY) {
         heldActor->speedXZ = speedXZ;
         heldActor->velocity.y = velocityY;
         func_80834644(play, this);
+
+        if (Player_IsCarryThrowSystemEnabled() && (heldActor->id == ACTOR_PLAYER)) {
+            Player* thrownPlayer = (Player*)heldActor;
+
+            func_80837B9C(thrownPlayer, play);
+            thrownPlayer->yaw = thrownPlayer->actor.shape.rot.y = thrownPlayer->actor.world.rot.y;
+
+            {
+                f32 forwardMult = 1.25f;
+                f32 upMult = 0.8f;
+                f32 newSpeed = speedXZ * forwardMult;
+
+                thrownPlayer->linearVelocity = newSpeed;
+                thrownPlayer->actor.speedXZ = newSpeed;
+                thrownPlayer->actor.velocity.x = Math_SinS(thrownPlayer->actor.world.rot.y) * newSpeed;
+                thrownPlayer->actor.velocity.z = Math_CosS(thrownPlayer->actor.world.rot.y) * newSpeed;
+                thrownPlayer->actor.velocity.y = velocityY * upMult;
+                thrownPlayer->actor.gravity = -1.4f;
+            }
+
+            thrownPlayer->actor.bgCheckFlags &= ~1;
+            thrownPlayer->hoverBootsTimer = 0;
+        }
+
         Player_PlaySfx(this, NA_SE_PL_THROW);
         Player_PlayVoiceSfx(this, NA_SE_VO_LI_SWORD_N);
     }
@@ -10324,6 +11372,7 @@ s32 func_80845C68(PlayState* play, s32 arg1) {
 }
 
 void Player_Action_80845CA4(Player* this, PlayState* play) {
+    Camera* playerCam;
     f32 sp3C;
     s32 temp;
     f32 sp34;
@@ -10368,10 +11417,15 @@ void Player_Action_80845CA4(Player* this, PlayState* play) {
 
             temp = func_80845BA0(play, this, &sp34, sp30);
 
-            if ((this->av2.actionVar2 == 0) ||
-                ((temp == 0) && (this->linearVelocity == 0.0f) && (Play_GetCamera(play, 0)->unk_14C & 0x10))) {
+            playerCam = Player_GetCameraForPlayerOrMain(play, this);
 
-                func_8005B1A4(Play_GetCamera(play, 0));
+            if ((this->av2.actionVar2 == 0) ||
+                ((temp == 0) && (this->linearVelocity == 0.0f) &&
+                 ((playerCam == NULL) || (playerCam->unk_14C & 0x10)))) {
+
+                if (playerCam != NULL) {
+                    func_8005B1A4(playerCam);
+                }
                 func_80845C68(play, gSaveContext.respawn[RESPAWN_MODE_DOWN].data);
 
                 if (!Player_ActionHandler_Talk(this, play)) {
@@ -10387,6 +11441,7 @@ void Player_Action_80845CA4(Player* this, PlayState* play) {
 }
 
 void Player_Action_80845EF8(Player* this, PlayState* play) {
+    Camera* playerCam;
     s32 sp2C;
 
     this->stateFlags2 |= PLAYER_STATE2_DISABLE_ROTATION_Z_TARGET;
@@ -10402,10 +11457,46 @@ void Player_Action_80845EF8(Player* this, PlayState* play) {
             }
         } else {
             func_8083C0E8(this, play);
+
+            // Fallback: if the target room was not queued during door interaction,
+            // queue it now so the door sequence can complete instead of stalling.
+            if ((play->roomCtx.prevRoom.num < 0) && (this->doorActor != NULL) &&
+                (this->doorActor->category == ACTORCAT_DOOR)) {
+                s32 transitionActorId = (u16)this->doorActor->params >> 0xA;
+                TransitionActorEntry* transitionEntry = &play->transiActorCtx.list[transitionActorId];
+                s32 side = (this->doorDirection > 0) ? 0 : 1;
+                s32 frontRoom = transitionEntry->sides[side].room;
+
+                if ((frontRoom < 0) || (frontRoom == play->roomCtx.curRoom.num)) {
+                    s32 oppositeRoom = transitionEntry->sides[side ^ 1].room;
+
+                    if ((oppositeRoom >= 0) && (oppositeRoom != play->roomCtx.curRoom.num)) {
+                        frontRoom = oppositeRoom;
+                    }
+                }
+
+                if ((frontRoom >= 0) && (frontRoom != play->roomCtx.curRoom.num)) {
+                    func_8009728C(play, &play->roomCtx, frontRoom);
+                }
+            }
+
             if (play->roomCtx.prevRoom.num >= 0) {
                 func_80097534(play, &play->roomCtx);
             }
-            func_8005B1A4(Play_GetCamera(play, 0));
+            if ((this->doorType != PLAYER_DOORTYPE_FAKE) && (this->doorActor != NULL) &&
+                (this->doorActor->category == ACTORCAT_DOOR)) {
+                s32 transitionActorId = (u16)this->doorActor->params >> 0xA;
+                s32 side = (this->doorDirection > 0) ? 0 : 1;
+                s32 targetRoom = play->transiActorCtx.list[transitionActorId].sides[side].room;
+
+                if (targetRoom >= 0) {
+                    this->actor.room = targetRoom;
+                }
+            }
+            playerCam = Player_GetCameraForPlayerOrMain(play, this);
+            if (playerCam != NULL) {
+                func_8005B1A4(playerCam);
+            }
             Play_SetupRespawnPoint(play, 0, 0xDFF);
         }
         return;
@@ -10428,12 +11519,46 @@ void Player_Action_80846050(Player* this, PlayState* play) {
     if (LinkAnimation_OnFrame(&this->skelAnime, 4.0f)) {
         Actor* interactRangeActor = this->interactRangeActor;
 
+        if ((interactRangeActor != NULL) && (interactRangeActor->id == ACTOR_PLAYER)) {
+            Player* targetPlayer = (Player*)interactRangeActor;
+
+            // This runs during the pickup windup, where this player already has CARRYING_ACTOR set.
+            // Avoid Player_CanPickupPlayer here because that flag would reject valid pickups.
+            // Instead, only reject if the target is no longer a valid carry target at grab frame.
+            if ((targetPlayer->actor.update == NULL) || (targetPlayer == this) ||
+                (Player_GetCarrier(targetPlayer) != NULL) || (targetPlayer->actor.parent != NULL) ||
+                (targetPlayer->heldActor != NULL) ||
+                (targetPlayer->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_TALKING | PLAYER_STATE1_IN_CUTSCENE)) ||
+                (targetPlayer->stateFlags2 & PLAYER_STATE2_UNDERWATER)) {
+                this->stateFlags1 &= ~PLAYER_STATE1_CARRYING_ACTOR;
+                this->interactRangeActor = NULL;
+                this->getItemId = GI_NONE;
+                func_80839F90(this, play);
+                return;
+            }
+        }
+
         if (!func_80835644(play, this, interactRangeActor)) {
             this->heldActor = interactRangeActor;
             this->actor.child = interactRangeActor;
             interactRangeActor->parent = &this->actor;
             interactRangeActor->bgCheckFlags &= 0xFF00;
             this->unk_3BC.y = interactRangeActor->shape.rot.y - this->actor.shape.rot.y;
+
+            if (Player_IsCarryThrowSystemEnabled() && (interactRangeActor->id == ACTOR_PLAYER)) {
+                Player* carriedPlayer = (Player*)interactRangeActor;
+
+                Player_SetupAction(play, carriedPlayer, Player_Action_CarriedByPlayer, 1);
+                Player_AnimPlayLoop(play, carriedPlayer, Player_GetIdleAnim(carriedPlayer));
+                carriedPlayer->interactRangeActor = NULL;
+                carriedPlayer->getItemId = GI_NONE;
+                carriedPlayer->linearVelocity = 0.0f;
+                carriedPlayer->actor.speedXZ = 0.0f;
+                carriedPlayer->actor.velocity.x = 0.0f;
+                carriedPlayer->actor.velocity.y = 0.0f;
+                carriedPlayer->actor.velocity.z = 0.0f;
+                carriedPlayer->actor.gravity = 0.0f;
+            }
         }
         return;
     }
@@ -10529,6 +11654,40 @@ void Player_Action_80846358(Player* this, PlayState* play) {
         func_80834644(play, this);
         Player_PlaySfx(this, NA_SE_PL_THROW);
         Player_PlayVoiceSfx(this, NA_SE_VO_LI_SWORD_N);
+    }
+}
+
+void Player_Action_CarriedByPlayer(Player* this, PlayState* play) {
+    Player* carrier = Player_GetCarrier(this);
+
+    if (carrier == NULL) {
+        if ((this->actor.speedXZ > 0.0f) || (this->actor.velocity.y > 0.0f)) {
+            func_80837B9C(this, play);
+            this->linearVelocity = this->actor.speedXZ;
+            this->yaw = this->actor.shape.rot.y = this->actor.world.rot.y;
+            this->actor.bgCheckFlags &= ~1;
+            return;
+        }
+
+        this->actor.minVelocityY = -20.0f;
+        this->actor.gravity = REG(68) / 100.0f;
+        func_80839F90(this, play);
+        return;
+    }
+
+    LinkAnimation_Update(play, &this->skelAnime);
+    this->linearVelocity = 0.0f;
+    this->actor.speedXZ = 0.0f;
+    this->actor.velocity.x = 0.0f;
+    this->actor.velocity.y = 0.0f;
+    this->actor.velocity.z = 0.0f;
+    this->actor.gravity = 0.0f;
+    this->interactRangeActor = NULL;
+    this->getItemId = GI_NONE;
+    this->actor.bgCheckFlags &= 0xFF00;
+
+    if (!Player_IsCarryThrowSystemEnabled() || CHECK_BTN_ALL(sControlInput->press.button, BTN_A)) {
+        func_80834644(play, carrier);
     }
 }
 
@@ -10729,9 +11888,14 @@ void Player_StartMode_WarpSong(PlayState* play, Player* this) {
 
 Actor* Player_SpawnMagicSpell(PlayState* play, Player* this, s32 spell) {
     static s16 sMagicSpellActorIds[] = { ACTOR_MAGIC_WIND, ACTOR_MAGIC_DARK, ACTOR_MAGIC_FIRE };
+    Actor* spellActor = Actor_Spawn(&play->actorCtx, play, sMagicSpellActorIds[spell], this->actor.world.pos.x,
+                                    this->actor.world.pos.y, this->actor.world.pos.z, 0, 0, 0, 0);
 
-    return Actor_Spawn(&play->actorCtx, play, sMagicSpellActorIds[spell], this->actor.world.pos.x,
-                       this->actor.world.pos.y, this->actor.world.pos.z, 0, 0, 0, 0);
+    if (spellActor != NULL) {
+        spellActor->home.rot.z = this->isSecondPlayer ? this->controllerPort : 1;
+    }
+
+    return spellActor;
 }
 
 void Player_StartMode_FaroresWind(PlayState* play, Player* this) {
@@ -10827,8 +11991,21 @@ void Player_Init(Actor* thisx, PlayState* play2) {
     this->ageProperties = &sAgeProperties[gSaveContext.linkAge];
     this->itemAction = this->heldItemAction = -1;
     this->heldItemId = ITEM_NONE;
+    this->controllerPort = 1;
+    this->inputEnabled = true;
+    this->isSecondPlayer = false;
+    this->linkedPlayer = NULL;
+
+    if ((thisx->params & 0x8000) != 0) {
+        this->isSecondPlayer = true;
+        this->controllerPort = 2;
+        thisx->params &= ~0x8000;
+    }
 
     Player_UseItem(play, this, ITEM_NONE);
+    this->bootsAreActive = false;
+    this->bootsToggleRequest = false;
+    this->equippedBoots = BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS));
     Player_SetEquipmentData(play, this);
     this->prevBoots = this->currentBoots;
     // keep masks thru loading zones
@@ -10919,7 +12096,7 @@ void Player_Init(Actor* thisx, PlayState* play2) {
     }
 
     if (gSaveContext.nayrusLoveTimer != 0) {
-        gSaveContext.magicState = MAGIC_STATE_METER_FLASH_1;
+        Magic_SetStateForPlayer(this, MAGIC_STATE_METER_FLASH_1);
         Player_SpawnMagicSpell(play, this, 1);
         this->stateFlags3 &= ~PLAYER_STATE3_RESTORE_NAYRUS_LOVE;
     }
@@ -10997,7 +12174,8 @@ static f32 D_80854784[] = { 120.0f, 240.0f, 360.0f };
  *     - Navi C-up icon for hints
  */
 void Player_UpdateInterface(PlayState* play, Player* this) {
-    if ((Message_GetState(&play->msgCtx) == TEXT_STATE_NONE) && (this->actor.category == ACTORCAT_PLAYER)) {
+    if ((Message_GetState(&play->msgCtx) == TEXT_STATE_NONE) && (this->actor.category == ACTORCAT_PLAYER) &&
+        !this->isSecondPlayer) {
         Actor* heldActor = this->heldActor;
         Actor* interactRangeActor = this->interactRangeActor;
         s32 sp24;
@@ -11269,7 +12447,7 @@ void Player_ProcessSceneCollision(PlayState* play, Player* this) {
             }
         }
 
-        if (this->actor.category == ACTORCAT_PLAYER) {
+        if ((this->actor.category == ACTORCAT_PLAYER) && !this->isSecondPlayer) {
             Audio_SetCodeReverb(SurfaceType_GetEcho(&play->colCtx, floorPoly, this->actor.floorBgId));
 
             if (this->actor.floorBgId == BGCHECK_SCENE) {
@@ -11524,16 +12702,22 @@ void Player_UpdateCamAndSeqModes(PlayState* play, Player* this) {
     s32 pad;
     Actor* focusActor;
     s32 camMode;
+    Camera* playerCam;
 
     if (this->actor.category == ACTORCAT_PLAYER) {
+        playerCam = Player_GetCameraForPlayer(play, this);
+        if (playerCam == NULL) {
+            return;
+        }
+
         seqMode = SEQ_MODE_DEFAULT;
 
         if (this->csAction != 0) {
-            Camera_ChangeMode(Play_GetCamera(play, 0), CAM_MODE_NORMAL);
+            Camera_ChangeMode(playerCam, CAM_MODE_NORMAL);
         } else if (!(this->stateFlags1 & PLAYER_STATE1_FIRST_PERSON)) {
             if ((this->actor.parent != NULL) && (this->stateFlags3 & PLAYER_STATE3_FLYING_WITH_HOOKSHOT)) {
                 camMode = CAM_MODE_HOOKSHOT;
-                Camera_SetParam(Play_GetCamera(play, 0), 8, this->actor.parent);
+                Camera_SetParam(playerCam, 8, this->actor.parent);
             } else if (Player_Action_8084377C == this->actionFunc) {
                 camMode = CAM_MODE_STILL;
             } else if (this->stateFlags2 & PLAYER_STATE2_GRABBING_DYNAPOLY) {
@@ -11550,7 +12734,7 @@ void Player_UpdateCamAndSeqModes(PlayState* play, Player* this) {
                 } else {
                     camMode = CAM_MODE_BATTLE;
                 }
-                Camera_SetParam(Play_GetCamera(play, 0), 8, focusActor);
+                Camera_SetParam(playerCam, 8, focusActor);
             } else if (this->stateFlags1 & PLAYER_STATE1_CHARGING_SPIN_ATTACK) {
                 camMode = CAM_MODE_CHARGE;
             } else if (this->stateFlags1 & PLAYER_STATE1_BOOMERANG_THROWN) {
@@ -11558,7 +12742,7 @@ void Player_UpdateCamAndSeqModes(PlayState* play, Player* this) {
                 if (CVarGetInteger(CVAR_ENHANCEMENT("BoomerangFirstPerson"), 0)) {
                     // Avoid camera jumps by switching  to normal cam to exit the first person camera,
                     // before following the boomerang
-                    if (Play_GetCamera(play, 0)->mode == CAM_MODE_FIRSTPERSON) {
+                    if (playerCam->mode == CAM_MODE_FIRSTPERSON) {
                         camMode = CAM_MODE_NORMAL;
                     } else {
                         camMode = CAM_MODE_FOLLOWBOOMERANG;
@@ -11567,7 +12751,7 @@ void Player_UpdateCamAndSeqModes(PlayState* play, Player* this) {
                 } else {
                     camMode = CAM_MODE_FOLLOWBOOMERANG;
                 }
-                Camera_SetParam(Play_GetCamera(play, 0), 8, this->boomerangActor);
+                Camera_SetParam(playerCam, 8, this->boomerangActor);
             } else if (this->stateFlags1 & (PLAYER_STATE1_HANGING_OFF_LEDGE | PLAYER_STATE1_CLIMBING_LEDGE)) {
                 if (Player_FriendlyLockOnOrParallel(this)) {
                     camMode = CAM_MODE_HANGZ;
@@ -11603,18 +12787,18 @@ void Player_UpdateCamAndSeqModes(PlayState* play, Player* this) {
                 }
             }
 
-            Camera_ChangeMode(Play_GetCamera(play, 0), camMode);
+            Camera_ChangeMode(playerCam, camMode);
         } else {
             // First person mode
             seqMode = SEQ_MODE_STILL;
         }
 
-        if (play->actorCtx.targetCtx.bgmEnemy != NULL) {
+        if (!this->isSecondPlayer && (play->actorCtx.targetCtx.bgmEnemy != NULL)) {
             seqMode = SEQ_MODE_ENEMY;
             Audio_SetBgmEnemyVolume(sqrtf(play->actorCtx.targetCtx.bgmEnemy->xyzDistToPlayerSq));
         }
 
-        if (play->sceneNum != SCENE_FISHING_POND) {
+        if (!this->isSecondPlayer && (play->sceneNum != SCENE_FISHING_POND)) {
             Audio_SetSequenceMode(seqMode);
         }
     }
@@ -11738,7 +12922,7 @@ void Player_UpdateBodyBurn(PlayState* play, Player* this) {
         }
 
         if ((dmgCooldown & play->gameplayFrames) == 0) {
-            Player_InflictDamage(play, -1);
+            Player_InflictDamage(play, this, -1);
         }
     } else {
         this->bodyIsBurning = false;
@@ -11853,6 +13037,21 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
 
     sControlInput = input;
 
+    if (this->isSecondPlayer) {
+        s32 expectedShield = SHIELD_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_SHIELD));
+        s32 expectedTunic = TUNIC_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_TUNIC));
+        s32 expectedBoots = BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS));
+
+        if ((this->currentShield != expectedShield) || (this->currentTunic != expectedTunic) ||
+            (this->equippedBoots != expectedBoots) || this->bootsToggleRequest) {
+            Player_SetEquipmentData(play, this);
+        }
+    }
+
+    // Boot physics tuning lives in global regs. Re-apply for each player every update
+    // so one player's quick boot toggle cannot leak movement behavior to another player.
+    Player_SetBootData(play, this);
+
     if (this->unk_A86 < 0) {
         this->unk_A86++;
         if (this->unk_A86 == 0) {
@@ -11904,8 +13103,8 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
     }
 
     if ((this->stateFlags3 & PLAYER_STATE3_RESTORE_NAYRUS_LOVE) && (gSaveContext.nayrusLoveTimer != 0) &&
-        (gSaveContext.magicState == MAGIC_STATE_IDLE)) {
-        gSaveContext.magicState = MAGIC_STATE_METER_FLASH_1;
+        (Magic_GetStateForPlayer(this) == MAGIC_STATE_IDLE)) {
+        Magic_SetStateForPlayer(this, MAGIC_STATE_METER_FLASH_1);
         Player_SpawnMagicSpell(play, this, 1);
         this->stateFlags3 &= ~PLAYER_STATE3_RESTORE_NAYRUS_LOVE;
     }
@@ -12016,6 +13215,8 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
                 this->actor.velocity.z += this->pushedSpeed * Math_CosS(this->pushedYaw);
             }
 
+            Player_ApplyElasticRopePull(this, play);
+
             Actor_UpdatePos(&this->actor);
             Player_ProcessSceneCollision(play, this);
         } else {
@@ -12076,7 +13277,7 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
         if (!Player_InBlockingCsMode(play, this) && !(this->stateFlags2 & PLAYER_STATE2_CRAWLING)) {
             func_8083D53C(play, this);
 
-            if ((this->actor.category == ACTORCAT_PLAYER) && (gSaveContext.health == 0)) {
+            if ((this->actor.category == ACTORCAT_PLAYER) && (*Player_GetHealthPtr(this) == 0)) {
                 if (this->stateFlags1 &
                     (PLAYER_STATE1_HANGING_OFF_LEDGE | PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_CLIMBING_LADDER)) {
                     func_80832440(play, this);
@@ -12098,7 +13299,7 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
             }
         }
 
-        if ((play->csCtx.state != CS_STATE_IDLE) && (this->csAction != 6) &&
+        if ((play->csCtx.state != CS_STATE_IDLE) && !this->isSecondPlayer && (this->csAction != 6) &&
             !(this->stateFlags1 & PLAYER_STATE1_ON_HORSE) && !(this->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY) &&
             (this->actor.category == ACTORCAT_PLAYER)) {
             CsCmdActorCue* linkActionCsCmd = play->csCtx.linkAction;
@@ -12123,6 +13324,17 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
             }
         } else {
             this->prevCsAction = 0;
+
+            // Recover from stale cutscene lock for the main player after cutscene exit.
+            if (!this->isSecondPlayer && (play->csCtx.state == CS_STATE_IDLE) &&
+                (this->stateFlags1 & PLAYER_STATE1_IN_CUTSCENE) &&
+                !(this->stateFlags1 & (PLAYER_STATE1_LOADING | PLAYER_STATE1_DEAD | PLAYER_STATE1_IN_ITEM_CS |
+                                       PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_TALKING)) &&
+                (this->actionFunc != Player_Action_CsAction) && (this->actionFunc != Player_Action_8084F608) &&
+                (this->actionFunc != Player_Action_80845CA4) && (this->actionFunc != Player_Action_80845EF8) &&
+                (this->actionFunc != Player_Action_8084F698) && (this->actionFunc != Player_Action_8084F710)) {
+                this->stateFlags1 &= ~PLAYER_STATE1_IN_CUTSCENE;
+            }
         }
 
         func_8083D6EC(play, this);
@@ -12221,7 +13433,8 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
 
         if (!(this->stateFlags2 & PLAYER_STATE2_FROZEN)) {
             if (!(this->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_HANGING_OFF_LEDGE |
-                                       PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_ON_HORSE))) {
+                                       PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_ON_HORSE)) &&
+                (Player_GetCarrier(this) == NULL)) {
                 CollisionCheck_SetOC(play, &play->colChkCtx, &this->cylinder.base);
             }
 
@@ -12241,7 +13454,8 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
     Math_Vec3f_Copy(&this->actor.home.pos, &this->actor.world.pos);
     Math_Vec3f_Copy(&this->unk_A88, &this->bodyPartsPos[PLAYER_BODYPART_WAIST]);
 
-    if (this->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE)) {
+    if ((Player_GetCarrier(this) != NULL) ||
+        (this->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE))) {
         this->actor.colChkInfo.mass = MASS_IMMOVABLE;
     } else {
         this->actor.colChkInfo.mass = 50;
@@ -12260,6 +13474,16 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
 
 static Vec3f D_80854838 = { 0.0f, 0.0f, -30.0f };
 
+static Input* Player_GetAssignedInput(PlayState* play, Player* this) {
+    s32 controllerPort = this->controllerPort;
+
+    if ((controllerPort < 1) || (controllerPort > ARRAY_COUNT(play->state.input))) {
+        controllerPort = 1;
+    }
+
+    return &play->state.input[controllerPort - 1];
+}
+
 s32 Player_UpdateNoclip(Player* this, PlayState* play);
 
 void Player_Update(Actor* thisx, PlayState* play) {
@@ -12267,8 +13491,12 @@ void Player_Update(Actor* thisx, PlayState* play) {
     Player* this = (Player*)thisx;
     s32 dogParams;
     s32 pad;
+    s32 suppressSecondaryInputDuringCutscene;
     Input sp44;
+    Input* assignedInput = Player_GetAssignedInput(play, this);
     Actor* dog;
+
+    LocalMP_SetCameraActionPlayer(this);
 
     if (Player_UpdateNoclip(this, play)) {
         if (gSaveContext.dogParams < 0) {
@@ -12298,27 +13526,61 @@ void Player_Update(Actor* thisx, PlayState* play) {
             Player_DetachHeldActor(play, this);
         }
 
-        if (this->stateFlags1 & (PLAYER_STATE1_INPUT_DISABLED | PLAYER_STATE1_IN_CUTSCENE)) {
+        suppressSecondaryInputDuringCutscene = Player_ShouldSuppressSecondaryInputDuringCutscene(play, this);
+        if (suppressSecondaryInputDuringCutscene) {
+            this->csAction = 0;
+            this->prevCsAction = 0;
+            this->stateFlags1 &= ~PLAYER_STATE1_IN_CUTSCENE;
+            Player_ZeroSpeedXZ(this);
+        }
+
+        if (suppressSecondaryInputDuringCutscene ||
+            (this->stateFlags1 & (PLAYER_STATE1_INPUT_DISABLED | PLAYER_STATE1_IN_CUTSCENE)) || !this->inputEnabled) {
             memset(&sp44, 0, sizeof(sp44));
         } else {
-            sp44 = play->state.input[0];
+            sp44 = *assignedInput;
             if (this->textboxBtnCooldownTimer != 0) {
                 sp44.cur.button &= ~(BTN_A | BTN_B | BTN_CUP);
                 sp44.press.button &= ~(BTN_A | BTN_B | BTN_CUP);
             }
         }
 
+        Player_HandleOriginalMultiplayerItemCycle(this, play, &sp44);
+
         if (CVarGetFloat(CVAR_CHEAT("SpeedModifier.Value"), 1.0f) != 1.0f &&
             CVarGetInteger(CVAR_CHEAT("SpeedModifier.SpeedToggle"), 0)) {
             const s32 mod1Mask = CVarGetInteger(CVAR_CHEAT("SpeedModifier.Btn"), BTN_CUSTOM_MODIFIER1);
 
-            if (mod1Mask != 0 && CHECK_BTN_ALL(sControlInput->cur.button, mod1Mask) &&
-                CHECK_BTN_ANY(sControlInput->press.button, mod1Mask)) {
+            if (mod1Mask != 0 && CHECK_BTN_ALL(sp44.cur.button, mod1Mask) && CHECK_BTN_ANY(sp44.press.button, mod1Mask)) {
                 gWalkSpeedToggle = !gWalkSpeedToggle;
             }
         }
 
+        if (!Player_InCsMode(play) && (play->msgCtx.msgMode == MSGMODE_NONE) &&
+            !(this->stateFlags1 & PLAYER_STATE1_TALKING) && CHECK_BTN_ALL(sp44.press.button, BTN_A)) {
+            s32 equippedBoots = BOOTS_EQUIP_TO_PLAYER(CUR_EQUIP_VALUE(EQUIP_TYPE_BOOTS));
+            s32 canToggle = false;
+
+            if ((equippedBoots == PLAYER_BOOTS_IRON) || (equippedBoots == PLAYER_BOOTS_HOVER)) {
+                if ((equippedBoots == PLAYER_BOOTS_IRON) && (this->stateFlags1 & PLAYER_STATE1_IN_WATER)) {
+                    canToggle = true;
+                } else if ((this->actor.bgCheckFlags & 1) && (this->linearVelocity < 0.1f) &&
+                           (ABS(sp44.rel.stick_x) < 10) && (ABS(sp44.rel.stick_y) < 10)) {
+                    canToggle = true;
+                }
+            }
+
+            if (canToggle) {
+                this->bootsToggleRequest = true;
+                Player_SetEquipmentData(play, this);
+                sp44.cur.button &= ~BTN_A;
+                sp44.press.button &= ~BTN_A;
+                sp44.rel.button &= ~BTN_A;
+            }
+        }
+
         Player_UpdateCommon(this, play, &sp44);
+        Player_OfferCarryToOtherPlayers(this, play);
     }
 
     MREG(52) = this->actor.world.pos.x;
@@ -12390,6 +13652,8 @@ void Player_Update(Actor* thisx, PlayState* play) {
     }
 
     GameInteractor_ExecuteOnPlayerUpdate();
+
+    LocalMP_SetCameraActionPlayer(NULL);
 }
 
 typedef struct BunnyEarKinematics {
@@ -12597,6 +13861,8 @@ void Player_Draw(Actor* thisx, PlayState* play2) {
             POLY_OPA_DISP = Play_SetFog(play, POLY_OPA_DISP);
         }
 
+        Player_DrawElasticRope(this, play);
+
         if (this->stateFlags2 & PLAYER_STATE2_FROZEN) {
             f32 scale = (this->av1.actionVar1 >> 1) * 22.0f;
 
@@ -12628,7 +13894,7 @@ void Player_Destroy(Actor* thisx, PlayState* play) {
     Collider_DestroyQuad(play, &this->meleeWeaponQuads[1]);
     Collider_DestroyQuad(play, &this->shieldQuad);
 
-    Magic_Reset(play);
+    Magic_ResetForPlayer(play, this);
 
     gSaveContext.linkAge = play->linkAgeOnLoad;
 
@@ -12641,31 +13907,33 @@ s16 func_8084ABD8(PlayState* play, Player* this, s32 arg2, s16 arg3) {
     s32 temp1 = 0;
     s16 temp2 = 0;
     s16 temp3 = 0;
-    s8 invertXAxisMulti = ((CVarGetInteger(CVAR_SETTING("Controls.InvertAimingXAxis"), 0) &&
-                            !CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0)) ||
-                           (!CVarGetInteger(CVAR_SETTING("Controls.InvertAimingXAxis"), 0) &&
-                            CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0)))
+    s32 rightStickAimEnabled = Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.RightStickAim"), 0);
+    s32 moveInFirstPersonEnabled = Player_GetCameraSettingInteger(this, CVAR_SETTING("MoveInFirstPerson"), 0);
+    s32 invertAimingXAxis = Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.InvertAimingXAxis"), 0);
+    s32 disableFirstPersonAutoCenterView =
+        Player_GetCameraSettingInteger(this, CVAR_SETTING("DisableFirstPersonAutoCenterView"), 0);
+    s8 invertXAxisMulti = ((invertAimingXAxis && !CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0)) ||
+                           (!invertAimingXAxis && CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0)))
                               ? -1
                               : 1;
-    s8 invertYAxisMulti = CVarGetInteger(CVAR_SETTING("Controls.InvertAimingYAxis"), 1) ? 1 : -1;
-    f32 xAxisMulti = CVarGetFloat(CVAR_SETTING("FirstPersonCameraSensitivity.X"), 1.0f);
-    f32 yAxisMulti = CVarGetFloat(CVAR_SETTING("FirstPersonCameraSensitivity.Y"), 1.0f);
+    s8 invertYAxisMulti = Player_GetCameraSettingInteger(this, CVAR_SETTING("Controls.InvertAimingYAxis"), 1) ? 1 : -1;
+    f32 xAxisMulti = Player_GetCameraSettingFloat(this, CVAR_SETTING("FirstPersonCameraSensitivity.X"), 1.0f);
+    f32 yAxisMulti = Player_GetCameraSettingFloat(this, CVAR_SETTING("FirstPersonCameraSensitivity.Y"), 1.0f);
 
     GameInteractor_ExecuteOnPlayerFirstPersonControl(this);
 
     if (!func_8002DD78(this) && !func_808334B4(this) && (arg2 == 0)) { // First person without weapon
         // Y Axis
-        if (!(CVarGetInteger(CVAR_SETTING("MoveInFirstPerson"), 0) &&
-              CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0))) {
+        if (!(moveInFirstPersonEnabled && rightStickAimEnabled)) {
             temp2 += sControlInput->rel.stick_y * 240.0f * invertYAxisMulti * yAxisMulti;
         }
-        if (CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0)) {
+        if (rightStickAimEnabled) {
             temp2 += sControlInput->rel.right_stick_y * 240.0f * invertYAxisMulti * yAxisMulti;
         }
         if (fabsf(sControlInput->cur.gyro_x) > 0.01f) {
             temp2 += (-sControlInput->cur.gyro_x) * 750.0f;
         }
-        if (CVarGetInteger(CVAR_SETTING("DisableFirstPersonAutoCenterView"), 0)) {
+        if (disableFirstPersonAutoCenterView) {
             this->actor.focus.rot.x += temp2 * 0.1f;
             this->actor.focus.rot.x = CLAMP(this->actor.focus.rot.x, -14000, 14000);
         } else {
@@ -12674,11 +13942,10 @@ s16 func_8084ABD8(PlayState* play, Player* this, s32 arg2, s16 arg3) {
 
         // X Axis
         temp2 = 0;
-        if (!(CVarGetInteger(CVAR_SETTING("MoveInFirstPerson"), 0) &&
-              CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0))) {
+        if (!(moveInFirstPersonEnabled && rightStickAimEnabled)) {
             temp2 += sControlInput->rel.stick_x * -16.0f * invertXAxisMulti * xAxisMulti;
         }
-        if (CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0)) {
+        if (rightStickAimEnabled) {
             temp2 += sControlInput->rel.right_stick_x * -16.0f * invertXAxisMulti * xAxisMulti;
         }
         if (fabsf(sControlInput->cur.gyro_y) > 0.01f) {
@@ -12690,13 +13957,12 @@ s16 func_8084ABD8(PlayState* play, Player* this, s32 arg2, s16 arg3) {
         // Y Axis
         temp1 = (this->stateFlags1 & PLAYER_STATE1_ON_HORSE) ? 3500 : 14000;
 
-        if (!(CVarGetInteger(CVAR_SETTING("MoveInFirstPerson"), 0) &&
-              CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0))) {
+                if (!(moveInFirstPersonEnabled && rightStickAimEnabled)) {
             temp3 += ((sControlInput->rel.stick_y >= 0) ? 1 : -1) *
                      (s32)((1.0f - Math_CosS(sControlInput->rel.stick_y * 200)) * 1500.0f) * invertYAxisMulti *
                      yAxisMulti;
         }
-        if (CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0)) {
+                if (rightStickAimEnabled) {
             temp3 += ((sControlInput->rel.right_stick_y >= 0) ? 1 : -1) *
                      (s32)((1.0f - Math_CosS(sControlInput->rel.right_stick_y * 200)) * 1500.0f) * invertYAxisMulti *
                      yAxisMulti;
@@ -12711,13 +13977,12 @@ s16 func_8084ABD8(PlayState* play, Player* this, s32 arg2, s16 arg3) {
         temp1 = 19114;
         temp2 = this->actor.focus.rot.y - this->actor.shape.rot.y;
         temp3 = 0;
-        if (!(CVarGetInteger(CVAR_SETTING("MoveInFirstPerson"), 0) &&
-              CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0))) {
+        if (!(moveInFirstPersonEnabled && rightStickAimEnabled)) {
             temp3 = ((sControlInput->rel.stick_x >= 0) ? 1 : -1) *
                     (s32)((1.0f - Math_CosS(sControlInput->rel.stick_x * 200)) * -1500.0f) * invertXAxisMulti *
                     xAxisMulti;
         }
-        if (CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0)) {
+        if (rightStickAimEnabled) {
             temp3 += ((sControlInput->rel.right_stick_x >= 0) ? 1 : -1) *
                      (s32)((1.0f - Math_CosS(sControlInput->rel.right_stick_x * 200)) * -1500.0f) * invertXAxisMulti *
                      xAxisMulti;
@@ -12729,8 +13994,7 @@ s16 func_8084ABD8(PlayState* play, Player* this, s32 arg2, s16 arg3) {
         this->actor.focus.rot.y = CLAMP(temp2, -temp1, temp1) + this->actor.shape.rot.y;
     }
 
-    if (CVarGetInteger(CVAR_SETTING("MoveInFirstPerson"), 0) &&
-        CVarGetInteger(CVAR_SETTING("Controls.RightStickAim"), 0)) {
+    if (moveInFirstPersonEnabled && rightStickAimEnabled) {
         f32 movementSpeed = LINK_IS_ADULT ? 9.0f : 8.25f;
         if (CVarGetInteger(CVAR_ENHANCEMENT("MMBunnyHood"), BUNNY_HOOD_VANILLA) != BUNNY_HOOD_VANILLA &&
             this->currentMask == PLAYER_MASK_BUNNY) {
@@ -14147,7 +15411,9 @@ s32 func_8084DFF4(PlayState* play, Player* this) {
                     gSaveContext.bgsFlag = true;
                     gSaveContext.swordHealth = 8;
                 }
+                Item_Give_SetPlayer(this);
                 Item_Give(play, giEntry.itemId);
+                Item_Give_ClearPlayer();
             } else {
                 Randomizer_Item_Give(play, giEntry);
             }
@@ -14498,28 +15764,40 @@ void Player_Action_8084EAC0(Player* this, PlayState* play) {
                     rand = 3;
                 }
 
-                if ((rand < 0) && (gSaveContext.health <= FULL_HEART_HEALTH)) {
+                if ((rand < 0) && (*Player_GetHealthPtr(this) <= FULL_HEART_HEALTH)) {
                     rand = 3;
                 }
 
                 if (rand < 0) {
-                    Health_ChangeBy(play, -FULL_HEART_HEALTH);
+                    Health_ChangeBy(play, -FULL_HEART_HEALTH, this);
                 } else {
-                    gSaveContext.healthAccumulator = rand * FULL_HEART_HEALTH;
+                    if (this->isSecondPlayer) {
+                        Health_ChangeBy(play, rand * FULL_HEART_HEALTH, this);
+                    } else {
+                        gSaveContext.healthAccumulator = rand * FULL_HEART_HEALTH;
+                    }
                 }
             } else {
                 s32 sp28 = D_808549FC[this->itemAction - PLAYER_IA_BOTTLE_POTION_RED];
 
                 if (sp28 & 1) {
-                    gSaveContext.healthAccumulator = MAX_HEALTH;
+                    if (this->isSecondPlayer) {
+                        Health_ChangeBy(play, MAX_HEALTH, this);
+                    } else {
+                        gSaveContext.healthAccumulator = MAX_HEALTH;
+                    }
                 }
 
                 if (sp28 & 2) {
-                    Magic_Fill(play);
+                    Magic_FillForPlayer(play, this);
                 }
 
                 if (sp28 & 4) {
-                    gSaveContext.healthAccumulator = 0x50;
+                    if (this->isSecondPlayer) {
+                        Health_ChangeBy(play, 0x50, this);
+                    } else {
+                        gSaveContext.healthAccumulator = 0x50;
+                    }
                 }
             }
 
@@ -14527,10 +15805,11 @@ void Player_Action_8084EAC0(Player* this, PlayState* play) {
             this->av2.actionVar2 = 1;
         } else {
             func_8083C0E8(this, play);
-            func_8005B1A4(Play_GetCamera(play, 0));
+            func_8005B1A4(Player_GetCameraForPlayerOrMain(play, this));
         }
     } else if (this->av2.actionVar2 == 1) {
-        if ((gSaveContext.healthAccumulator == 0) && (gSaveContext.magicState != MAGIC_STATE_FILL)) {
+        if ((this->isSecondPlayer || (gSaveContext.healthAccumulator == 0)) &&
+            (Magic_GetStateForPlayer(this) != MAGIC_STATE_FILL)) {
             Player_AnimChangeOnceMorphAdjusted(play, this, &gPlayerAnim_link_bottle_drink_demo_end);
             this->av2.actionVar2 = 2;
             Player_UpdateBottleHeld(play, this, ITEM_BOTTLE, PLAYER_IA_BOTTLE);
@@ -14574,18 +15853,21 @@ void Player_Action_SwingBottle(Player* this, PlayState* play) {
     if (LinkAnimation_Update(play, &this->skelAnime)) {
         if (this->av1.bottleCatchType != BOTTLE_CATCH_NONE) {
             if (!this->av2.startedTextbox) {
-                if (CVarGetInteger(CVAR_ENHANCEMENT("FastBottles"), 0)) {
+                BottleCatchInfo* catchInfo = &sBottleCatchInfo[this->av1.bottleCatchType - 1];
+                s32 shouldSkipBottleCutscene = CVarGetInteger(CVAR_ENHANCEMENT("FastBottles"), 0) ||
+                                              (Player_GetLocalMultiplayerPlayerCount() > 1);
+
+                if (shouldSkipBottleCutscene) {
                     this->av1.bottleCatchType = BOTTLE_CATCH_NONE;
                 } else {
-                    // 1 is subtracted because `sBottleCatchInfo` does not have an entry for `BOTTLE_CATCH_NONE`
-                    Message_StartTextbox(play, sBottleCatchInfo[this->av1.bottleCatchType - 1].textId, &this->actor);
+                    Message_StartTextbox(play, catchInfo->textId, &this->actor);
                 }
                 Audio_PlayFanfare(NA_BGM_ITEM_GET | 0x900);
-                GameInteractor_ExecuteOnPlayerBottleUpdate((sBottleCatchInfo[this->av1.bottleCatchType - 1].itemId));
+                GameInteractor_ExecuteOnPlayerBottleUpdate(catchInfo->itemId);
                 this->av2.startedTextbox = true;
             } else if (Message_GetState(&play->msgCtx) == TEXT_STATE_CLOSING) {
                 this->av1.bottleCatchType = BOTTLE_CATCH_NONE;
-                func_8005B1A4(Play_GetCamera(play, 0));
+                func_8005B1A4(Player_GetCameraForPlayerOrMain(play, this));
             }
         } else {
             func_8083C0E8(this, play);
@@ -14613,19 +15895,22 @@ void Player_Action_SwingBottle(Player* this, PlayState* play) {
 
                 if (GameInteractor_Should(VB_BOTTLE_ACTOR, i < ARRAY_COUNT(sBottleCatchInfo),
                                           this->interactRangeActor)) {
+                    s32 shouldSkipBottleCutscene = CVarGetInteger(CVAR_ENHANCEMENT("FastBottles"), 0) ||
+                                                  (Player_GetLocalMultiplayerPlayerCount() > 1);
+
                     // 1 is added because `sBottleCatchInfo` does not have an entry for `BOTTLE_CATCH_NONE`
                     this->av1.bottleCatchType = i + 1;
 
                     this->av2.startedTextbox = false;
-                    if (!CVarGetInteger(CVAR_ENHANCEMENT("FastBottles"), 0)) {
+                    if (!shouldSkipBottleCutscene) {
                         this->stateFlags1 |= PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE;
                     }
                     this->interactRangeActor->parent = &this->actor;
 
                     Player_UpdateBottleHeld(play, this, catchInfo->itemId, ABS(catchInfo->itemAction));
-                    if (!CVarGetInteger(CVAR_ENHANCEMENT("FastBottles"), 0)) {
+                    if (!shouldSkipBottleCutscene) {
                         Player_AnimPlayOnceAdjusted(play, this, swingEntry->catchAnimation);
-                        func_80835EA4(play, 4);
+                        Player_SetTurnAroundCameraForPlayer(play, this, 4);
                     }
                 }
             }
@@ -14645,7 +15930,7 @@ static Vec3f D_80854A1C = { 0.0f, 0.0f, 5.0f };
 void Player_Action_8084EED8(Player* this, PlayState* play) {
     if (LinkAnimation_Update(play, &this->skelAnime)) {
         func_8083C0E8(this, play);
-        func_8005B1A4(Play_GetCamera(play, 0));
+        func_8005B1A4(Player_GetCameraForPlayerOrMain(play, this));
         return;
     }
 
@@ -14655,7 +15940,11 @@ void Player_Action_8084EED8(Player* this, PlayState* play) {
         Player_PlaySfx(this, NA_SE_EV_BOTTLE_CAP_OPEN);
         Player_PlaySfx(this, NA_SE_EV_FIATY_HEAL - SFX_FLAG);
     } else if (LinkAnimation_OnFrame(&this->skelAnime, 47.0f)) {
-        gSaveContext.healthAccumulator = MAX_HEALTH;
+        if (this->isSecondPlayer) {
+            Health_ChangeBy(play, MAX_HEALTH, this);
+        } else {
+            gSaveContext.healthAccumulator = MAX_HEALTH;
+        }
     }
 }
 
@@ -14677,7 +15966,7 @@ void Player_Action_8084EFC0(Player* this, PlayState* play) {
 
     if (LinkAnimation_Update(play, &this->skelAnime)) {
         func_8083C0E8(this, play);
-        func_8005B1A4(Play_GetCamera(play, 0));
+        func_8005B1A4(Player_GetCameraForPlayerOrMain(play, this));
         return;
     }
 
@@ -14729,6 +16018,15 @@ void Player_Action_ExchangeItem(Player* this, PlayState* play) {
             if (this->av2.actionVar2 == 0) {
                 s32 pad;
 
+                // In multiplayer with no talk actor, skip the global textbox so it does not cover
+                // other players' viewports and does not trigger Play_InCsMode via Player_SetupTalk.
+                if (Player_GetLocalMultiplayerPlayerCount() > 1 && this->talkActor == NULL) {
+                    // Skip textbox; pretend it already closed so the action finishes immediately.
+                    this->av2.actionVar2 = -1;
+                    func_8005B1A4(Player_GetCameraForPlayerOrMain(play, this));
+                    return;
+                }
+
                 Message_StartTextbox(play, this->actor.textId, &this->actor);
 
                 if ((this->itemAction == PLAYER_IA_CHICKEN) || (this->itemAction == PLAYER_IA_POCKET_CUCCO)) {
@@ -14747,7 +16045,7 @@ void Player_Action_ExchangeItem(Player* this, PlayState* play) {
                     func_8083C0E8(this, play);
                 }
 
-                func_8005B1A4(Play_GetCamera(play, 0));
+                func_8005B1A4(Player_GetCameraForPlayerOrMain(play, this));
             }
         }
     } else if (this->av2.actionVar2 >= 0) {
@@ -14964,7 +16262,7 @@ void Player_Action_8084FB10(Player* this, PlayState* play) {
         }
 
         if ((play->gameplayFrames % 4) == 0) {
-            Player_InflictDamage(play, -1);
+            Player_InflictDamage(play, this, -1);
         }
     } else {
         if (LinkAnimation_Update(play, &this->skelAnime)) {
@@ -15009,7 +16307,7 @@ void Player_Action_8084FBF4(Player* this, PlayState* play) {
  * @return  true if Noclip is disabled, false if enabled
  */
 s32 Player_UpdateNoclip(Player* this, PlayState* play) {
-    sControlInput = &play->state.input[0];
+    sControlInput = Player_GetAssignedInput(play, this);
     s32 mask = CVarGetInteger("gDeveloperTools.NoClipBtn", BTN_L | BTN_DRIGHT);
 
     if (CVarGetInteger(CVAR_DEVELOPER_TOOLS("DebugEnabled"), 0) &&
@@ -15044,7 +16342,7 @@ s32 Player_UpdateNoclip(Player* this, PlayState* play) {
                 s16 angle;
                 s16 temp;
 
-                angle = temp = Camera_GetInputDirYaw(GET_ACTIVE_CAM(play));
+                angle = temp = Player_GetInputDirYawForPlayer(play, this);
 
                 if (CHECK_BTN_ALL(sControlInput->cur.button, BTN_DDOWN)) {
                     angle = temp + 0x8000;
@@ -15335,7 +16633,7 @@ void Player_Action_808507F4(Player* this, PlayState* play) {
     if (LinkAnimation_Update(play, &this->skelAnime)) {
         if (this->av1.actionVar1 < 0) {
             if ((this->itemAction == PLAYER_IA_NAYRUS_LOVE) || isFastFarores ||
-                (gSaveContext.magicState == MAGIC_STATE_IDLE)) {
+                (Magic_GetStateForPlayer(this) == MAGIC_STATE_IDLE)) {
                 func_80839FFC(this, play);
                 func_8005B1A4(Play_GetCamera(play, 0));
             }
@@ -15347,10 +16645,10 @@ void Player_Action_808507F4(Player* this, PlayState* play) {
                 if (Player_SpawnMagicSpell(play, this, this->av1.actionVar1) != NULL) {
                     this->stateFlags1 |= PLAYER_STATE1_IN_ITEM_CS | PLAYER_STATE1_IN_CUTSCENE;
                     if ((this->av1.actionVar1 != 0) || (gSaveContext.respawn[RESPAWN_MODE_TOP].data <= 0)) {
-                        gSaveContext.magicState = MAGIC_STATE_CONSUME_SETUP;
+                        Magic_SetStateForPlayer(this, MAGIC_STATE_CONSUME_SETUP);
                     }
                 } else {
-                    Magic_Reset(play);
+                    Magic_ResetForPlayer(play, this);
                 }
             } else {
                 LinkAnimation_PlayLoopSetSpeed(play, &this->skelAnime, D_80854A64[this->av1.actionVar1],
@@ -16616,13 +17914,11 @@ void func_80853080(Player* this, PlayState* play) {
     this->yaw = this->actor.shape.rot.y;
 }
 
-s32 Player_InflictDamage(PlayState* play, s32 damage) {
-    return Player_InflictDamageModified(play, damage, true);
+s32 Player_InflictDamage(PlayState* play, Player* this, s32 damage) {
+    return Player_InflictDamageModified(play, this, damage, true);
 }
 
-s32 Player_InflictDamageModified(PlayState* play, s32 damage, u8 modified) {
-    Player* this = GET_PLAYER(play);
-
+s32 Player_InflictDamageModified(PlayState* play, Player* this, s32 damage, u8 modified) {
     if (!Player_InBlockingCsMode(play, this) && !func_80837B18_modified(play, this, damage, modified)) {
         this->stateFlags2 &= ~PLAYER_STATE2_GRABBED_BY_ENEMY;
         return 1;

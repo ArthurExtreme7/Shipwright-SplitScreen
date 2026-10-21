@@ -777,12 +777,9 @@ void Minimap_Draw(PlayState* play) {
         minimapColor = CVarGetColor24(CVAR_COSMETIC("HUD.Minimap.Value"), minimapColor);
     }
 
-    OPEN_DISPS(play->state.gfxCtx);
+    R_MINIMAP_DISABLED = !CVarGetInteger(CVAR_ENHANCEMENT("ShowMinimap"), 1);
 
-    // If any of these CVars are enabled, disable toggling the minimap with L, unless gEnableMapToggle is set
-    bool enableMapToggle =
-        !(CVarGetInteger(CVAR_DEVELOPER_TOOLS("DebugEnabled"), 0) || CVarGetInteger(CVAR_CHEAT("MoonJumpOnL"), 0)) ||
-        CVarGetInteger(CVAR_DEVELOPER_TOOLS("EnableMapToggle"), 0);
+    OPEN_DISPS(play->state.gfxCtx);
 
     if (play->pauseCtx.state < 4) {
         // Minimap margins
@@ -864,18 +861,6 @@ void Minimap_Draw(PlayState* play) {
                         Gfx_SetupDL_39Overlay(play->state.gfxCtx);
                         MapMark_Draw(play);
                     }
-                }
-
-                if (CHECK_BTN_ALL(play->state.input[0].press.button, BTN_L) && !Play_InCsMode(play) &&
-                    enableMapToggle) {
-                    osSyncPrintf("Game_play_demo_mode_check=%d\n", Play_InCsMode(play));
-                    // clang-format off
-                    if (!R_MINIMAP_DISABLED) { Audio_PlaySoundGeneral(NA_SE_SY_CAMERA_ZOOM_UP, &gSfxDefaultPos, 4,
-                                                                      &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb); }
-                    else { Audio_PlaySoundGeneral(NA_SE_SY_CAMERA_ZOOM_DOWN, &gSfxDefaultPos, 4,
-                                                  &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb); }
-                    // clang-format on
-                    R_MINIMAP_DISABLED ^= 1;
                 }
 
                 break;
@@ -1057,17 +1042,6 @@ void Minimap_Draw(PlayState* play) {
                     }
 
                     Minimap_DrawCompassIcons(play); // Draw icons for the player spawn and current position
-                }
-
-                if (CHECK_BTN_ALL(play->state.input[0].press.button, BTN_L) && !Play_InCsMode(play) &&
-                    enableMapToggle) {
-                    // clang-format off
-                    if (!R_MINIMAP_DISABLED) { Audio_PlaySoundGeneral(NA_SE_SY_CAMERA_ZOOM_UP, &gSfxDefaultPos, 4,
-                                                                      &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb); }
-                    else { Audio_PlaySoundGeneral(NA_SE_SY_CAMERA_ZOOM_DOWN, &gSfxDefaultPos, 4,
-                                                  &gSfxDefaultFreqAndVolScale, &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb); }
-                    // clang-format on
-                    R_MINIMAP_DISABLED ^= 1;
                 }
 
                 break;

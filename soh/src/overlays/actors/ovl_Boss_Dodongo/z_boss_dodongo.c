@@ -451,11 +451,14 @@ void BossDodongo_IntroCutscene(BossDodongo* this, PlayState* play) {
             break;
         case 1:
             func_80064520(play, &play->csCtx);
-            Player_SetCsActionWithHaltedActors(play, &this->actor, 1);
-            Play_ClearAllSubCameras(play);
-            this->cutsceneCamera = Play_CreateSubCamera(play);
-            Play_ChangeCameraStatus(play, 0, 1);
-            Play_ChangeCameraStatus(play, this->cutsceneCamera, 7);
+                Player_SetCsActionWithHaltedActors(play, &this->actor, 1);
+                Play_ClearAllSubCameras(play);
+                this->cutsceneCamera = Play_CreateSubCamera(play);
+                osSyncPrintf("[KD_CAM] Created cutscene subcamera index=%d cameraPtr=%p play=%p\n", this->cutsceneCamera,
+                             Play_GetCamera(play, this->cutsceneCamera), play);
+                Play_ChangeCameraStatus(play, 0, 1);
+                Play_ChangeCameraStatus(play, this->cutsceneCamera, 7);
+                osSyncPrintf("[KD_CAM] Changed camera statuses: main=0 status set, cutscene=%d status set\n", this->cutsceneCamera);
             this->csState = 2;
             this->unk_196 = 0x3C;
             this->unk_198 = 160;
@@ -594,6 +597,8 @@ void BossDodongo_IntroCutscene(BossDodongo* this, PlayState* play) {
                 camera->eye = this->cameraEye;
                 camera->eyeNext = this->cameraEye;
                 camera->at = this->cameraAt;
+                osSyncPrintf("[KD_CAM] Ending cutscene: restoring camera from subcam=%d play=%p mainCamPtr=%p\n",
+                             this->cutsceneCamera, play, Play_GetCamera(play, MAIN_CAM));
                 func_800C08AC(play, this->cutsceneCamera, 0);
                 this->cutsceneCamera = 0;
                 func_80064534(play, &play->csCtx);

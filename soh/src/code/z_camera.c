@@ -2,12 +2,362 @@
 #include "global.h"
 #include "vt.h"
 
+#include <stdio.h>
 #include <string.h>
+
+#ifdef _MSC_VER
+#include <windows.h>
+#endif
 
 #include "overlays/actors/ovl_En_Horse/z_en_horse.h"
 
 #include "soh/frame_interpolation.h"
 #include "soh/Enhancements/controls/Mouse.h"
+
+#define LOCAL_MP_PLAYER_COUNT_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount")
+#define LOCAL_MP_DISABLED_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.Disable")
+#define LOCAL_MP_SPLITSCREEN_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen")
+
+static s32 Camera_IsLocalMultiplayerEnabled(void) {
+    return !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) && (CVarGetInteger(LOCAL_MP_PLAYER_COUNT_CVAR, 2) > 1);
+}
+
+static s32 Camera_IsSplitScreenEnabled(void) {
+    return Camera_IsLocalMultiplayerEnabled() && CVarGetInteger(LOCAL_MP_SPLITSCREEN_CVAR, 1);
+}
+
+static Player* sLocalMPCameraActionPlayer = NULL;
+
+void LocalMP_SetCameraActionPlayer(Player* player) {
+    sLocalMPCameraActionPlayer = player;
+}
+
+Camera* Camera_GetPlayerCamera(PlayState* play, Player* player) {
+    s32 camId;
+
+    if ((play == NULL) || (player == NULL)) {
+        return NULL;
+    }
+
+    if ((play->cameraPtrs[MAIN_CAM] != NULL) && (play->cameraPtrs[MAIN_CAM]->player == player)) {
+        return play->cameraPtrs[MAIN_CAM];
+    }
+
+    for (camId = SUBCAM_FIRST; camId < NUM_CAMS; camId++) {
+        Camera* camera = play->cameraPtrs[camId];
+
+        if ((camera != NULL) && (camera->player == player)) {
+            return camera;
+        }
+    }
+
+    return NULL;
+}
+
+Camera* Camera_ResolvePlayerActionCamera(Camera* camera) {
+    PlayState* play;
+    Camera* mainCam;
+    Camera* playerCam;
+    Player* actionPlayer;
+
+    if ((camera == NULL) || ((play = camera->play) == NULL) || !Camera_IsSplitScreenEnabled()) {
+        return camera;
+    }
+
+    actionPlayer = sLocalMPCameraActionPlayer;
+    if (actionPlayer == NULL) {
+        return camera;
+    }
+
+    mainCam = play->cameraPtrs[MAIN_CAM];
+    if ((mainCam != NULL) && (mainCam->player == actionPlayer)) {
+        return camera;
+    }
+
+    playerCam = Camera_GetPlayerCamera(play, actionPlayer);
+    if (playerCam != NULL) {
+        return playerCam;
+    }
+
+    if ((camera->player != NULL) && (camera->player != actionPlayer)) {
+        return NULL;
+    }
+
+    return camera;
+}
+
+static s32 Camera_HasPendingViewUpdate(Camera* camera) {
+    if ((camera == NULL) || (camera->play == NULL)) {
+        return false;
+    }
+
+    if ((camera->thisIdx == MAIN_CAM) || !Camera_IsSplitScreenEnabled()) {
+        return camera->play->view.unk_124 != 0;
+    }
+
+    return true;
+}
+
+static void Camera_SetPendingViewUpdate(Camera* camera) {
+    if ((camera == NULL) || (camera->play == NULL)) {
+        return;
+    }
+
+    if ((camera->thisIdx == MAIN_CAM) || !Camera_IsSplitScreenEnabled()) {
+        camera->play->view.unk_124 = camera->thisIdx | 0x50;
+    }
+}
+
+static void Camera_ClearPendingViewUpdate(Camera* camera) {
+    if ((camera == NULL) || (camera->play == NULL)) {
+        return;
+    }
+
+    if ((camera->thisIdx == MAIN_CAM) || !Camera_IsSplitScreenEnabled()) {
+        camera->play->view.unk_124 = 0;
+    }
+}
+
+static const char* Camera_GetPlayerCameraSettingCVar(Camera* camera, const char* baseCVar, char* cVarBuffer,
+                                                      size_t cVarBufferSize) {
+    s32 controllerPort;
+    char legacyCVarBuffer[96];
+
+    if (!Camera_IsSplitScreenEnabled() || (camera == NULL) || (camera->player == NULL) || (baseCVar == NULL) ||
+        (cVarBuffer == NULL) || (cVarBufferSize == 0)) {
+        return baseCVar;
+    }
+
+    controllerPort = camera->player->controllerPort;
+    if ((controllerPort <= 1) || (controllerPort > 4)) {
+        return baseCVar;
+    }
+
+    snprintf(cVarBuffer, cVarBufferSize, "%s_P%d", baseCVar, controllerPort);
+    snprintf(legacyCVarBuffer, sizeof(legacyCVarBuffer), "%s.P%d", baseCVar, controllerPort);
+
+    if (CVarExists(legacyCVarBuffer)) {
+        if (!CVarExists(cVarBuffer)) {
+            CVarCopy(legacyCVarBuffer, cVarBuffer);
+        }
+
+        CVarClear(legacyCVarBuffer);
+    }
+
+    return cVarBuffer;
+}
+
+static s32 Camera_GetPlayerCameraSettingInteger(Camera* camera, const char* baseCVar, s32 defaultValue) {
+    char cVarBuffer[96];
+
+    return CVarGetInteger(Camera_GetPlayerCameraSettingCVar(camera, baseCVar, cVarBuffer, sizeof(cVarBuffer)),
+                          defaultValue);
+}
+
+static f32 Camera_GetPlayerCameraSettingFloat(Camera* camera, const char* baseCVar, f32 defaultValue) {
+    char cVarBuffer[96];
+
+    return CVarGetFloat(Camera_GetPlayerCameraSettingCVar(camera, baseCVar, cVarBuffer, sizeof(cVarBuffer)),
+                        defaultValue);
+}
+
+static bool sSplitManualCamera[NUM_CAMS] = { false, false, false, false };
+static f32 sSplitCamX[NUM_CAMS] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static f32 sSplitCamY[NUM_CAMS] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static PlayState* sSplitManualPlay = NULL;
+static s16 sSplitManualScene = -1;
+
+static void Camera_ResetSplitManualState(void) {
+    memset(sSplitManualCamera, 0, sizeof(sSplitManualCamera));
+    memset(sSplitCamX, 0, sizeof(sSplitCamX));
+    memset(sSplitCamY, 0, sizeof(sSplitCamY));
+}
+
+static bool Camera_SplitManualStateActive(void) {
+    s32 i;
+
+    for (i = 0; i < ARRAY_COUNT(sSplitManualCamera); i++) {
+        if (sSplitManualCamera[i]) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static Input* Camera_GetInputByControllerPort(Camera* camera, s32 controllerPort) {
+    if ((camera == NULL) || (camera->play == NULL)) {
+        return NULL;
+    }
+
+    if ((controllerPort < 1) || (controllerPort > ARRAY_COUNT(camera->play->state.input))) {
+        controllerPort = 1;
+    }
+
+    return &camera->play->state.input[controllerPort - 1];
+}
+
+static void Camera_GetSharedScreenRightStickInput(Camera* camera, s8* rightStickX, s8* rightStickY) {
+    Actor* actor;
+    s32 sanity;
+    s8 bestX = 0;
+    s8 bestY = 0;
+    bool foundMappedPlayer = false;
+
+    if ((rightStickX == NULL) || (rightStickY == NULL)) {
+        return;
+    }
+
+    *rightStickX = 0;
+    *rightStickY = 0;
+
+    if ((camera == NULL) || (camera->play == NULL)) {
+        return;
+    }
+
+    actor = camera->play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    sanity = 0;
+
+    while ((actor != NULL) && (sanity < 2000)) {
+        if ((actor->id == ACTOR_PLAYER) && (actor->update != NULL)) {
+            Player* player = (Player*)actor;
+            Input* input = Camera_GetInputByControllerPort(camera, player->controllerPort);
+
+            if (input != NULL) {
+                if (ABS(input->cur.right_stick_x) > ABS(bestX)) {
+                    bestX = input->cur.right_stick_x;
+                }
+
+                if (ABS(input->cur.right_stick_y) > ABS(bestY)) {
+                    bestY = input->cur.right_stick_y;
+                }
+
+                foundMappedPlayer = true;
+            }
+        }
+
+        actor = actor->next;
+        sanity++;
+    }
+
+    if (!foundMappedPlayer) {
+        Input* input = Camera_GetInputByControllerPort(camera, 1);
+
+        if (input != NULL) {
+            bestX = input->cur.right_stick_x;
+            bestY = input->cur.right_stick_y;
+        }
+    }
+
+    *rightStickX = bestX;
+    *rightStickY = bestY;
+}
+
+static void Camera_GetActiveRightStickInput(Camera* camera, s8* rightStickX, s8* rightStickY) {
+    s32 controllerPort = 1;
+    Input* input;
+
+    if ((rightStickX == NULL) || (rightStickY == NULL)) {
+        return;
+    }
+
+    *rightStickX = 0;
+    *rightStickY = 0;
+
+    if (Camera_IsLocalMultiplayerEnabled() && !Camera_IsSplitScreenEnabled()) {
+        Camera_GetSharedScreenRightStickInput(camera, rightStickX, rightStickY);
+        return;
+    }
+
+    if ((camera != NULL) && (camera->player != NULL)) {
+        controllerPort = camera->player->controllerPort;
+    }
+
+    input = Camera_GetInputByControllerPort(camera, controllerPort);
+    if (input == NULL) {
+        return;
+    }
+
+    *rightStickX = input->cur.right_stick_x;
+    *rightStickY = input->cur.right_stick_y;
+}
+
+static void Camera_GetManualState(Camera* camera, bool** manualCamera, f32** camX, f32** camY) {
+    bool useSplitState = Camera_IsSplitScreenEnabled() && (camera != NULL) && (camera->play != NULL) &&
+                         (camera->thisIdx >= MAIN_CAM) && (camera->thisIdx < NUM_CAMS);
+
+    if (!useSplitState) {
+        if ((camera != NULL) && (camera->play != NULL)) {
+            if (sSplitManualPlay == camera->play) {
+                Camera_ResetSplitManualState();
+                sSplitManualPlay = NULL;
+                sSplitManualScene = -1;
+            }
+
+            *manualCamera = &camera->play->manualCamera;
+            *camX = &camera->play->camX;
+            *camY = &camera->play->camY;
+        } else {
+            static bool sFallbackManual = false;
+            static f32 sFallbackCamX = 0.0f;
+            static f32 sFallbackCamY = 0.0f;
+
+            *manualCamera = &sFallbackManual;
+            *camX = &sFallbackCamX;
+            *camY = &sFallbackCamY;
+        }
+
+        return;
+    }
+
+    if ((sSplitManualPlay != camera->play) || (sSplitManualScene != camera->play->sceneNum)) {
+        Camera_ResetSplitManualState();
+        sSplitManualPlay = camera->play;
+        sSplitManualScene = camera->play->sceneNum;
+    }
+
+    if (!camera->play->manualCamera && Camera_SplitManualStateActive()) {
+        Camera_ResetSplitManualState();
+    }
+
+    camera->play->manualCamera = Camera_SplitManualStateActive();
+
+    *manualCamera = &sSplitManualCamera[camera->thisIdx];
+    *camX = &sSplitCamX[camera->thisIdx];
+    *camY = &sSplitCamY[camera->thisIdx];
+}
+
+static void Camera_SyncManualCameraFlag(Camera* camera) {
+    if ((camera == NULL) || (camera->play == NULL)) {
+        return;
+    }
+
+    if (Camera_IsSplitScreenEnabled() && (sSplitManualPlay == camera->play)) {
+        camera->play->manualCamera = Camera_SplitManualStateActive();
+    }
+}
+
+static s32 Camera_IsActorInPlayState(PlayState* play, Actor* actor) {
+    if ((play == NULL) || (actor == NULL)) {
+        return false;
+    }
+
+    for (s32 category = 0; category < ACTORCAT_MAX; category++) {
+        Actor* iter = play->actorCtx.actorLists[category].head;
+        s32 sanity = 0;
+
+        while ((iter != NULL) && (sanity < 2000)) {
+            if (iter == actor) {
+                return true;
+            }
+
+            iter = iter->next;
+            sanity++;
+        }
+    }
+
+    return false;
+}
 
 s16 Camera_ChangeSettingFlags(Camera* camera, s16 setting, s16 flags);
 s32 Camera_ChangeModeFlags(Camera* camera, s16 mode, u8 flags);
@@ -732,10 +1082,79 @@ void Camera_CopyDataToRegs(Camera* camera, s16 mode) {
     camera->animState = 0;
 }
 
+static s32 sSplitCameraDataRegs[NUM_CAMS][CAM_DATA_MAX];
+static s16 sSplitCameraDataSetting[NUM_CAMS];
+static s16 sSplitCameraDataMode[NUM_CAMS];
+static s16 sSplitCameraDataUID[NUM_CAMS];
+static bool sSplitCameraDataValid[NUM_CAMS];
+
+static bool Camera_GetSplitDataCacheIndex(Camera* camera, s32* index) {
+    if ((camera == NULL) || (camera->thisIdx < 0) || (camera->thisIdx >= NUM_CAMS)) {
+        return false;
+    }
+
+    *index = camera->thisIdx;
+    return true;
+}
+
+static void Camera_LoadSplitDataRegs(Camera* camera) {
+    s32 index;
+    s32 i;
+
+    if (!Camera_GetSplitDataCacheIndex(camera, &index)) {
+        return;
+    }
+
+    if (!Camera_IsSplitScreenEnabled()) {
+        sSplitCameraDataValid[index] = false;
+        return;
+    }
+
+    if (sSplitCameraDataValid[index] && (sSplitCameraDataUID[index] == camera->uid) &&
+        (sSplitCameraDataSetting[index] == camera->setting) && (sSplitCameraDataMode[index] == camera->mode)) {
+        for (i = 0; i < CAM_DATA_MAX; i++) {
+            R_CAM_DATA(i) = sSplitCameraDataRegs[index][i];
+        }
+        return;
+    }
+
+    Camera_CopyDataToRegs(camera, camera->mode);
+    sSplitCameraDataUID[index] = camera->uid;
+    sSplitCameraDataSetting[index] = camera->setting;
+    sSplitCameraDataMode[index] = camera->mode;
+    sSplitCameraDataValid[index] = true;
+}
+
+static void Camera_SaveSplitDataRegs(Camera* camera) {
+    s32 index;
+    s32 i;
+
+    if (!Camera_GetSplitDataCacheIndex(camera, &index)) {
+        return;
+    }
+
+    if (!Camera_IsSplitScreenEnabled()) {
+        sSplitCameraDataValid[index] = false;
+        return;
+    }
+
+    for (i = 0; i < CAM_DATA_MAX; i++) {
+        sSplitCameraDataRegs[index][i] = R_CAM_DATA(i);
+    }
+    sSplitCameraDataUID[index] = camera->uid;
+    sSplitCameraDataSetting[index] = camera->setting;
+    sSplitCameraDataMode[index] = camera->mode;
+    sSplitCameraDataValid[index] = true;
+}
+
 s32 Camera_CopyPREGToModeValues(Camera* camera) {
     CameraModeValue* values = sCameraSettings[camera->setting].cameraModes[camera->mode].values;
     CameraModeValue* valueP;
     s32 i;
+
+    if (Camera_IsSplitScreenEnabled()) {
+        return true;
+    }
 
     for (i = 0; i < sCameraSettings[camera->setting].cameraModes[camera->mode].valueCnt; i++) {
         valueP = &values[i];
@@ -755,7 +1174,15 @@ s32 Camera_CopyPREGToModeValues(Camera* camera) {
 void Camera_UpdateInterface(s16 flags) {
     s16 interfaceAlpha;
 
-    if ((flags & SHRINKWIN_MASK) != SHRINKWIN_MASK) {
+    if (Camera_IsLocalMultiplayerEnabled()) {
+        sCameraShrinkWindowVal = 0;
+
+        if (flags & SHRINKWIN_CURVAL) {
+            ShrinkWindow_SetCurrentVal(0);
+        } else {
+            ShrinkWindow_SetVal(0);
+        }
+    } else if ((flags & SHRINKWIN_MASK) != SHRINKWIN_MASK) {
         switch (flags & SHRINKWINVAL_MASK) {
             case 0x1000:
                 sCameraShrinkWindowVal = 0x1A;
@@ -1418,22 +1845,35 @@ s32 Camera_Noop(Camera* camera) {
 }
 
 s32 SetCameraManual(Camera* camera) {
-    f32 newCamX = -D_8015BD7C->state.input[0].cur.right_stick_x * 10.0f;
-    f32 newCamY = D_8015BD7C->state.input[0].cur.right_stick_y * 10.0f;
+    f32 newCamX;
+    f32 newCamY;
+    s8 rightStickX;
+    s8 rightStickY;
+    bool* manualCamera;
+    f32* camX;
+    f32* camY;
+
+    Camera_GetManualState(camera, &manualCamera, &camX, &camY);
+    Camera_GetActiveRightStickInput(camera, &rightStickX, &rightStickY);
+
+    newCamX = -rightStickX * 10.0f;
+    newCamY = rightStickY * 10.0f;
 
     Mouse_HandleThirdPerson(&newCamX, &newCamY);
 
-    if ((fabsf(newCamX) >= 15.0f || fabsf(newCamY) >= 15.0f) && camera->play->manualCamera == false) {
-        camera->play->manualCamera = true;
-
+    if ((fabsf(newCamX) >= 15.0f || fabsf(newCamY) >= 15.0f) && !(*manualCamera)) {
         VecSph eyeAdjustment;
+
+        *manualCamera = true;
         OLib_Vec3fDiffToVecSphGeo(&eyeAdjustment, &camera->at, &camera->eye);
 
-        camera->play->camX = eyeAdjustment.yaw;
-        camera->play->camY = eyeAdjustment.pitch;
+        *camX = eyeAdjustment.yaw;
+        *camY = eyeAdjustment.pitch;
     }
 
-    if (camera->play->manualCamera) {
+    Camera_SyncManualCameraFlag(camera);
+
+    if (*manualCamera) {
         return 1;
     }
 
@@ -1448,6 +1888,15 @@ s32 Camera_Free(Camera* camera) {
     CamColChk sp6C;
     Parallel1* para1 = (Parallel1*)camera->paramData;
     f32 playerHeight;
+    f32 newCamX;
+    f32 newCamY;
+    s8 rightStickX;
+    s8 rightStickY;
+    bool* manualCamera;
+    f32* camX;
+    f32* camY;
+
+    Camera_GetManualState(camera, &manualCamera, &camX, &camY);
 
     at->x = Camera_LERPCeilF(camera->player->actor.world.pos.x, camera->at.x, 0.5f, 1.0f);
     at->y = Camera_LERPCeilF(camera->player->actor.world.pos.y + (camera->player->rideActor != NULL
@@ -1486,42 +1935,51 @@ s32 Camera_Free(Camera* camera) {
 
     camera->animState = 0;
 
-    f32 newCamX = -D_8015BD7C->state.input[0].cur.right_stick_x * 10.0f;
-    f32 newCamY = +D_8015BD7C->state.input[0].cur.right_stick_y * 10.0f;
+    if (!(*manualCamera)) {
+        Camera_SyncManualCameraFlag(camera);
+        return 1;
+    }
+
+    Camera_GetActiveRightStickInput(camera, &rightStickX, &rightStickY);
+
+    newCamX = -rightStickX * 10.0f;
+    newCamY = +rightStickY * 10.0f;
 
     /* Disable mouse movement when holding down the shield */
     if (!(camera->player->stateFlags1 & 0x400000)) {
         Mouse_HandleThirdPerson(&newCamX, &newCamY);
     }
 
-    newCamX *= (CVarGetFloat(CVAR_SETTING("FreeLook.CameraSensitivity.X"), 1.0f));
-    newCamY *= (CVarGetFloat(CVAR_SETTING("FreeLook.CameraSensitivity.Y"), 1.0f));
+    newCamX *= (Camera_GetPlayerCameraSettingFloat(camera, CVAR_SETTING("FreeLook.CameraSensitivity.X"), 1.0f));
+    newCamY *= (Camera_GetPlayerCameraSettingFloat(camera, CVAR_SETTING("FreeLook.CameraSensitivity.Y"), 1.0f));
 
-    bool invertXAxis = (CVarGetInteger(CVAR_SETTING("FreeLook.InvertXAxis"), 0) &&
+    bool invertXAxis = (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.InvertXAxis"), 0) &&
                         !CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0)) ||
-                       (!CVarGetInteger(CVAR_SETTING("FreeLook.InvertXAxis"), 0) &&
+                       (!Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.InvertXAxis"), 0) &&
                         CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0));
 
-    camera->play->camX += newCamX * (invertXAxis ? -1 : 1);
-    camera->play->camY += newCamY * (CVarGetInteger(CVAR_SETTING("FreeLook.InvertYAxis"), 1) ? 1 : -1);
+    *camX += newCamX * (invertXAxis ? -1 : 1);
+    *camY +=
+        newCamY * (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.InvertYAxis"), 1) ? 1 : -1);
 
-    if (camera->play->camY > 0x32A4) {
-        camera->play->camY = 0x32A4;
+    if (*camY > 0x32A4) {
+        *camY = 0x32A4;
     }
-    if (camera->play->camY < -0x228C) {
-        camera->play->camY = -0x228C;
+    if (*camY < -0x228C) {
+        *camY = -0x228C;
     }
 
-    f32 distTarget = CVarGetInteger(CVAR_SETTING("FreeLook.MaxCameraDistance"), para1->distTarget);
-    f32 speedScaler = CVarGetInteger(CVAR_SETTING("FreeLook.TransitionSpeed"), 25);
+    f32 distTarget =
+        Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.MaxCameraDistance"), para1->distTarget);
+    f32 speedScaler = Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.TransitionSpeed"), 25);
     f32 distDiff = ABS(distTarget - camera->dist);
     if (distDiff > 0)
         camera->dist = Camera_LERPCeilF(distTarget, camera->dist, speedScaler / (distDiff + speedScaler), 0.0f);
     OLib_Vec3fDiffToVecSphGeo(&spA8, at, eyeNext);
 
     spA8.r = camera->dist;
-    spA8.yaw = camera->play->camX;
-    spA8.pitch = camera->play->camY;
+    spA8.yaw = *camX;
+    spA8.pitch = *camY;
 
     Camera_Vec3fVecSphGeoAdd(eyeNext, at, &spA8);
     if (camera->status == CAM_STAT_ACTIVE) {
@@ -1533,11 +1991,14 @@ s32 Camera_Free(Camera* camera) {
     camera->fov = Camera_LERPCeilF(65.0f, camera->fov, camera->fovUpdateRate, 1.0f);
     camera->roll = Camera_LERPCeilS(0, camera->roll, 0.5, 0xA);
 
+    Camera_SyncManualCameraFlag(camera);
+
     return 1;
 }
 
 s32 Camera_Normal1(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -1783,7 +2244,8 @@ s32 Camera_Normal1(Camera* camera) {
 }
 
 s32 Camera_Normal2(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -1954,7 +2416,8 @@ s32 Camera_Normal2(Camera* camera) {
 
 // riding epona
 s32 Camera_Normal3(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -2318,7 +2781,8 @@ s32 Camera_Parallel0(Camera* camera) {
  * Generic jump, jumping off ledges
  */
 s32 Camera_Jump1(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -2468,7 +2932,8 @@ s32 Camera_Jump1(Camera* camera) {
 
 // Climbing ladders/vines
 s32 Camera_Jump2(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -2655,7 +3120,8 @@ s32 Camera_Jump2(Camera* camera) {
 
 // swimming
 s32 Camera_Jump3(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -3117,7 +3583,8 @@ s32 Camera_Battle3(Camera* camera) {
  * setting value.
  */
 s32 Camera_Battle4(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -3476,9 +3943,9 @@ s32 Camera_KeepOn3(Camera* camera) {
         return 1;
     }
     if (camera->animState == 0 || camera->animState == 0xA || camera->animState == 0x14) {
-        if (camera->play->view.unk_124 == 0) {
+        if (!Camera_HasPendingViewUpdate(camera)) {
             camera->unk_14C |= 0x20;
-            camera->play->view.unk_124 = camera->thisIdx | 0x50;
+            Camera_SetPendingViewUpdate(camera);
             return 1;
         }
         camera->unk_14C &= ~0x20;
@@ -3655,10 +4122,10 @@ s32 Camera_KeepOn4(Camera* camera) {
     s32 i;
 
     if (camera->animState == 0 || camera->animState == 0xA || camera->animState == 0x14) {
-        if (camera->play->view.unk_124 == 0) {
+        if (!Camera_HasPendingViewUpdate(camera)) {
             camera->unk_14C |= 0x20;
             camera->unk_14C &= ~(0x4 | 0x2);
-            camera->play->view.unk_124 = camera->thisIdx | 0x50;
+            Camera_SetPendingViewUpdate(camera);
             return 1;
         }
         unk20->unk_14 = *temp_s0;
@@ -3671,7 +4138,7 @@ s32 Camera_KeepOn4(Camera* camera) {
         camera->animState = 0x14;
         camera->unk_14C |= 0x20;
         camera->unk_14C &= ~(0x4 | 0x2);
-        camera->play->view.unk_124 = camera->thisIdx | 0x50;
+        Camera_SetPendingViewUpdate(camera);
         return 1;
     }
 
@@ -4331,8 +4798,8 @@ s32 Camera_Subj3(Camera* camera) {
     Actor_GetFocus(&sp60, &camera->player->actor);
     playerHeight = Player_GetHeight(camera->player);
 
-    if (camera->play->view.unk_124 == 0) {
-        camera->play->view.unk_124 = camera->thisIdx | 0x50;
+    if (!Camera_HasPendingViewUpdate(camera)) {
+        Camera_SetPendingViewUpdate(camera);
         return true;
     }
 
@@ -4458,8 +4925,8 @@ s32 Camera_Subj4(Camera* camera) {
         Camera_CopyPREGToModeValues(camera);
     }
 
-    if (camera->play->view.unk_124 == 0) {
-        camera->play->view.unk_124 = (camera->thisIdx | 0x50);
+    if (!Camera_HasPendingViewUpdate(camera)) {
+        Camera_SetPendingViewUpdate(camera);
         anim->unk_24 = camera->xzSpeed;
         return true;
     }
@@ -4652,7 +5119,8 @@ s32 Camera_Data4(Camera* camera) {
  * Hanging off of a ledge
  */
 s32 Camera_Unique1(Camera* camera) {
-    if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1) {
+    if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+        SetCameraManual(camera) == 1) {
         Camera_Free(camera);
         return 1;
     }
@@ -5600,13 +6068,27 @@ s32 Camera_Unique9(Camera* camera) {
         case 19: {
             // Change the parent camera (or default)'s mode to normal
             s32 camIdx = camera->parentCamIdx <= SUBCAM_NONE ? MAIN_CAM : camera->parentCamIdx;
+            Camera* mainCam = camera->play->cameraPtrs[MAIN_CAM];
+
+            if ((camera->thisIdx != MAIN_CAM) && (mainCam != NULL) && (camera->player != NULL) &&
+                (mainCam->player != camera->player)) {
+                camIdx = camera->thisIdx;
+            }
 
             Camera_ChangeModeFlags(camera->play->cameraPtrs[camIdx], CAM_MODE_NORMAL, 1);
         }
         case 18: {
             // copy the current camera to the parent (or default)'s camera.
             s32 camIdx = camera->parentCamIdx <= SUBCAM_NONE ? MAIN_CAM : camera->parentCamIdx;
-            Camera* cam = camera->play->cameraPtrs[camIdx];
+            Camera* mainCam = camera->play->cameraPtrs[MAIN_CAM];
+            Camera* cam;
+
+            if ((camera->thisIdx != MAIN_CAM) && (mainCam != NULL) && (camera->player != NULL) &&
+                (mainCam->player != camera->player)) {
+                camIdx = camera->thisIdx;
+            }
+
+            cam = camera->play->cameraPtrs[camIdx];
 
             *eye = *eyeNext;
             Camera_Copy(cam, camera);
@@ -6588,7 +7070,12 @@ s32 Camera_Special5(Camera* camera) {
 
     OLib_Vec3fDiffToVecSphGeo(&sp64, at, eye);
     OLib_Vec3fDiffToVecSphGeo(&sp5C, at, eyeNext);
-    Actor_GetWorld(&spA8, camera->target);
+
+    if ((camera->target != NULL) && (camera->target->update != NULL)) {
+        Actor_GetWorld(&spA8, camera->target);
+    } else {
+        camera->target = NULL;
+    }
 
     sCameraInterfaceFlags = spec5->interfaceFlags;
 
@@ -6600,7 +7087,7 @@ s32 Camera_Special5(Camera* camera) {
     if (anim->animTimer > 0) {
         anim->animTimer--;
     } else if (anim->animTimer == 0) {
-        if (camera->target == NULL || camera->target->update == NULL) {
+        if (camera->target == NULL) {
             camera->target = NULL;
             return true;
         }
@@ -6833,9 +7320,10 @@ s32 Camera_Special9(Camera* camera) {
         Camera_CopyPREGToModeValues(camera);
     }
 
-    if (spec9->doorParams.doorActor != NULL) {
+    if ((spec9->doorParams.doorActor != NULL) && Camera_IsActorInPlayState(camera->play, spec9->doorParams.doorActor)) {
         Actor_GetWorldPosShapeRot(&adjustedPlayerPosRot, spec9->doorParams.doorActor);
     } else {
+        spec9->doorParams.doorActor = NULL;
         adjustedPlayerPosRot = *playerPosRot;
         adjustedPlayerPosRot.pos.y += playerYOffset + params->yOffset;
         adjustedPlayerPosRot.rot.x = 0;
@@ -7072,6 +7560,7 @@ void Camera_Stub80058140(Camera* camera) {
 
 void Camera_InitPlayerSettings(Camera* camera, Player* player) {
     PosRot playerPosShape;
+
     VecSph eyeNextAtOffset;
     s32 bgId;
     Vec3f floorPos;
@@ -7372,8 +7861,13 @@ s32 Camera_UpdateHotRoom(Camera* camera) {
 
 s32 Camera_DbgChangeMode(Camera* camera) {
     s32 changeDir = 0;
+    s32 localMpPlayerCount = (CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                   ? 1
+                                   : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2));
+    s32 localMpUsesThirdController = localMpPlayerCount >= 3;
 
-    if (!gDbgCamEnabled && camera->play->activeCamera == MAIN_CAM) {
+    if (!gDbgCamEnabled && camera->play->activeCamera == MAIN_CAM &&
+        CVarGetInteger(CVAR_DEVELOPER_TOOLS("DebugEnabled"), 0) && !localMpUsesThirdController) {
         if (CHECK_BTN_ALL(D_8015BD7C->state.input[2].press.button, BTN_CUP)) {
             osSyncPrintf("attention sound URGENCY\n");
             Sfx_PlaySfxCentered(NA_SE_SY_ATTENTION_URGENCY);
@@ -7500,7 +7994,34 @@ Vec3s Camera_Update(Camera* camera) {
     QuakeCamCalc quake;
     Player* player;
 
-    player = camera->play->cameraPtrs[MAIN_CAM]->player;
+    player = NULL;
+    if ((camera != NULL) && (camera->play != NULL)) {
+        if (camera->player != NULL) {
+            player = camera->player;
+        } else {
+            Camera* mainCam = camera->play->cameraPtrs[MAIN_CAM];
+            if (mainCam != NULL) {
+#ifdef _MSC_VER
+                __try {
+                    player = mainCam->player;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    osSyncPrintf("[CAM_DBG] SEH fault reading mainCam->player camera=%p play=%p mainCam=%p activeCam=%d setting=%d\n",
+                                 camera, camera->play, mainCam, camera->play->activeCamera, camera->setting);
+                    player = NULL;
+                }
+#else
+                osSyncPrintf("[CAM_DBG] Skipping unsafe deref of mainCam->player on non-MSVC build camera=%p play=%p mainCam=%p activeCam=%d setting=%d\n",
+                             camera, camera->play, mainCam, camera->play->activeCamera, camera->setting);
+                player = NULL;
+#endif
+            } else {
+                osSyncPrintf("[CAM_DBG] mainCam == NULL camera=%p play=%p activeCam=%d setting=%d\n",
+                             camera, camera->play, camera->play->activeCamera, camera->setting);
+            }
+        }
+    }
+
+    Camera_LoadSplitDataRegs(camera);
 
     if (R_DBG_CAM_UPDATE) {
         osSyncPrintf("camera: in %x\n", camera);
@@ -7510,6 +8031,7 @@ Vec3s Camera_Update(Camera* camera) {
         if (R_DBG_CAM_UPDATE) {
             osSyncPrintf("camera: cut out %x\n", camera);
         }
+        Camera_SaveSplitDataRegs(camera);
         return camera->inputDir;
     }
 
@@ -7557,7 +8079,7 @@ Vec3s Camera_Update(Camera* camera) {
             }
 
             if ((camera->unk_14C & 1) && (camera->unk_14C & 4) && (!(camera->unk_14C & 0x400)) &&
-                (!(camera->unk_14C & 0x200) || (player->currentBoots == PLAYER_BOOTS_IRON)) &&
+                (!(camera->unk_14C & 0x200) || (player != NULL && player->currentBoots == PLAYER_BOOTS_IRON)) &&
                 (!(camera->unk_14C & (s16)0x8000)) && (playerGroundY != BGCHECK_Y_MIN)) {
                 camDataIdx = Camera_GetDataIdxForPoly(camera, &bgId, playerFloorPoly);
                 if (camDataIdx != -1) {
@@ -7569,7 +8091,7 @@ Vec3s Camera_Update(Camera* camera) {
             }
 
             if (camera->nextCamDataIdx != -1 && (fabsf(curPlayerPosRot.pos.y - playerGroundY) < 2.0f) &&
-                (!(camera->unk_14C & 0x200) || (player->currentBoots == PLAYER_BOOTS_IRON))) {
+                (!(camera->unk_14C & 0x200) || (player != NULL && player->currentBoots == PLAYER_BOOTS_IRON))) {
                 camera->bgCheckId = camera->nextBGCheckId;
                 Camera_ChangeDataIdx(camera, camera->nextCamDataIdx);
                 camera->nextCamDataIdx = -1;
@@ -7632,8 +8154,17 @@ Vec3s Camera_Update(Camera* camera) {
                      sCameraSettings[camera->setting].cameraModes[camera->mode].funcIdx);
     }
 
+    if (gDbgCamEnabled && ((CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                 ? 1
+                                 : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2)) >= 3)) {
+        gDbgCamEnabled = 0;
+    }
+
     // enable/disable debug cam
     if (CVarGetInteger(CVAR_DEVELOPER_TOOLS("DebugEnabled"), 0) &&
+        ((CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+              ? 1
+              : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2)) < 3) &&
         CHECK_BTN_ALL(D_8015BD7C->state.input[2].press.button, BTN_START)) {
         gDbgCamEnabled ^= 1;
         if (gDbgCamEnabled) {
@@ -7651,12 +8182,14 @@ Vec3s Camera_Update(Camera* camera) {
         if (R_DBG_CAM_UPDATE) {
             osSyncPrintf("camera: debug out\n");
         }
+        Camera_SaveSplitDataRegs(camera);
         return D_8015BD80.sub.unk_104A;
     }
 
     OREG(0) &= ~8;
 
     if (camera->status == 3) {
+        Camera_SaveSplitDataRegs(camera);
         return camera->inputDir;
     }
 
@@ -7732,6 +8265,7 @@ Vec3s Camera_Update(Camera* camera) {
         }
     }
 
+    Camera_SaveSplitDataRegs(camera);
     return camera->inputDir;
 }
 
@@ -7739,13 +8273,21 @@ Vec3s Camera_Update(Camera* camera) {
  * When the camera's timer is 0, change the camera to its parent
  */
 void Camera_Finish(Camera* camera) {
-    Camera* mainCam = camera->play->cameraPtrs[MAIN_CAM];
-    Player* player = GET_PLAYER(camera->play);
+    Camera* mainCam = NULL;
+    Player* player = NULL;
+
+    if (camera != NULL && camera->play != NULL) {
+        if (camera->play->cameraPtrs[MAIN_CAM] != NULL) {
+            mainCam = camera->play->cameraPtrs[MAIN_CAM];
+        }
+        player = (mainCam != NULL) ? mainCam->player : GET_PLAYER(camera->play);
+    }
 
     if (camera->timer == 0) {
         Play_ChangeCameraStatus(camera->play, camera->parentCamIdx, CAM_STAT_ACTIVE);
 
-        if ((camera->parentCamIdx == MAIN_CAM) && (camera->csId != 0)) {
+        if ((camera->parentCamIdx == MAIN_CAM) && (camera->csId != 0) && (player != NULL) &&
+            ((camera->player == NULL) || (camera->player == player))) {
             player->actor.freezeTimer = 0;
             player->stateFlags1 &= ~PLAYER_STATE1_IN_CUTSCENE;
 
@@ -7785,6 +8327,11 @@ s32 func_8005A02C(Camera* camera) {
 
 s32 Camera_ChangeModeFlags(Camera* camera, s16 mode, u8 flags) {
     static s32 modeChangeFlags = 0;
+
+    camera = Camera_ResolvePlayerActionCamera(camera);
+    if (camera == NULL) {
+        return -1;
+    }
 
     if (QREG(89)) {
         osSyncPrintf("+=+(%d)+=+ recive request -> %s\n", camera->play->state.frames, sCameraModeNames[mode]);
@@ -7905,7 +8452,8 @@ s32 Camera_ChangeModeFlags(Camera* camera, s16 mode, u8 flags) {
         }
 
         // Clear free look if an action is performed that would move the camera (targeting, first person, talking)
-        if (CVarGetInteger(CVAR_SETTING("FreeLook.Enabled"), 0) && SetCameraManual(camera) == 1 &&
+        if (Camera_GetPlayerCameraSettingInteger(camera, CVAR_SETTING("FreeLook.Enabled"), 0) &&
+            SetCameraManual(camera) == 1 &&
             ((mode >= CAM_MODE_TARGET && mode <= CAM_MODE_BATTLE) ||
              (mode >= CAM_MODE_FIRSTPERSON && mode <= CAM_MODE_CLIMBZ) || mode == CAM_MODE_HANGZ ||
              mode == CAM_MODE_FOLLOWBOOMERANG)) {
@@ -7937,6 +8485,11 @@ s32 Camera_CheckValidMode(Camera* camera, s16 mode) {
 }
 
 s16 Camera_ChangeSettingFlags(Camera* camera, s16 setting, s16 flags) {
+    camera = Camera_ResolvePlayerActionCamera(camera);
+    if (camera == NULL) {
+        return -1;
+    }
+
     if (camera->unk_14A & 1) {
         if (((u32)(sCameraSettings[camera->setting].unk_00 & 0xF000000) >> 0x18) >=
             ((u32)(sCameraSettings[setting].unk_00 & 0xF000000) >> 0x18)) {
@@ -8005,6 +8558,11 @@ s32 Camera_ChangeSetting(Camera* camera, s16 setting) {
 s32 Camera_ChangeDataIdx(Camera* camera, s32 camDataIdx) {
     s16 newCameraSetting;
     s16 settingChangeSuccessful;
+
+    camera = Camera_ResolvePlayerActionCamera(camera);
+    if (camera == NULL) {
+        return -1;
+    }
 
     if (camDataIdx == -1 || camDataIdx == camera->camDataIdx) {
         camera->unk_14A |= 0x40;
@@ -8092,6 +8650,11 @@ s32 Camera_AddQuake(Camera* camera, s32 arg1, s16 y, s32 countdown) {
 
 s32 Camera_SetParam(Camera* camera, s32 param, void* value) {
     s32 pad[3];
+
+    camera = Camera_ResolvePlayerActionCamera(camera);
+    if (camera == NULL) {
+        return false;
+    }
 
     if (value != NULL) {
         switch (param) {
@@ -8182,7 +8745,14 @@ s16 func_8005AD1C(Camera* camera, s16 arg1) {
 
 s32 Camera_ChangeDoorCam(Camera* camera, Actor* doorActor, s16 camDataIdx, f32 arg3, s16 timer1, s16 timer2,
                          s16 timer3) {
-    DoorParams* doorParams = (DoorParams*)camera->paramData;
+    DoorParams* doorParams;
+
+    camera = Camera_ResolvePlayerActionCamera(camera);
+    if (camera == NULL) {
+        return 0;
+    }
+
+    doorParams = (DoorParams*)camera->paramData;
 
     if ((camera->setting == CAM_SET_CS_ATTENTION) || (camera->setting == CAM_SET_DOORC)) {
         return 0;
@@ -8258,6 +8828,11 @@ Vec3f* Camera_GetSkyboxOffset(Vec3f* dst, Camera* camera) {
 
 void Camera_SetCameraData(Camera* camera, s16 setDataFlags, void* data0, void* data1, s16 data2, s16 data3,
                           UNK_TYPE arg6) {
+    camera = Camera_ResolvePlayerActionCamera(camera);
+    if (camera == NULL) {
+        return;
+    }
+
     if (setDataFlags & 0x1) {
         camera->data0 = data0;
     }
@@ -8319,6 +8894,11 @@ s32 func_8005B198() {
 }
 
 s16 func_8005B1A4(Camera* camera) {
+    camera = Camera_ResolvePlayerActionCamera(camera);
+    if (camera == NULL) {
+        return SUBCAM_NONE;
+    }
+
     camera->unk_14C |= 0x8;
 
     if ((camera->thisIdx == MAIN_CAM) && (camera->play->activeCamera != MAIN_CAM)) {
