@@ -1,7 +1,7 @@
 [submodule "libultraship"]
 	path = libultraship
 	url = https://github.com/ArthurExtreme7/libultraship-splitscreen.git
-	branch = split-screen
+	branch = main
 [submodule "ZAPDTR"]
 	path = ZAPDTR
 	url = https://github.com/harbourmasters/ZAPDTR
