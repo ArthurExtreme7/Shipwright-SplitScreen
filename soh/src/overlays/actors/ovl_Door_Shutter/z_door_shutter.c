@@ -389,6 +389,35 @@ static s32 DoorShutter_SecondaryPlayersCanTrigger(PlayState* play) {
     return !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) && CVarGetInteger(LOCAL_MP_SECONDARY_AREA_LOAD_CVAR, 0);
 }
 
+static s32 DoorShutter_AnyActivePlayerCanUpdate(PlayState* play) {
+    Player* mainPlayer = GET_PLAYER(play);
+    Actor* actor;
+    s32 sanity = 0;
+
+    if (!DoorShutter_SecondaryPlayersCanTrigger(play)) {
+        return (mainPlayer != NULL) && !(mainPlayer->stateFlags1 & (PLAYER_STATE1_TALKING | PLAYER_STATE1_DEAD |
+                                                                  PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_IN_ITEM_CS));
+    }
+
+    actor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+
+    while ((actor != NULL) && (sanity < 2000)) {
+        if ((actor->id == ACTOR_PLAYER) && (actor->update != NULL)) {
+            Player* player = (Player*)actor;
+
+            if (!(player->stateFlags1 & (PLAYER_STATE1_TALKING | PLAYER_STATE1_DEAD | PLAYER_STATE1_GETTING_ITEM |
+                                         PLAYER_STATE1_IN_ITEM_CS))) {
+                return true;
+            }
+        }
+
+        actor = actor->next;
+        sanity++;
+    }
+
+    return false;
+}
+
 static Player* DoorShutter_GetTriggerPlayer(PlayState* play, DoorShutter* this) {
     Player* mainPlayer = GET_PLAYER(play);
     Player* triggerPlayer = NULL;
@@ -741,11 +770,8 @@ void func_80997744(DoorShutter* this, PlayState* play) {
 
 void DoorShutter_Update(Actor* thisx, PlayState* play) {
     DoorShutter* this = (DoorShutter*)thisx;
-    Player* player = GET_PLAYER(play);
 
-    if (!(player->stateFlags1 &
-          (PLAYER_STATE1_TALKING | PLAYER_STATE1_DEAD | PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_IN_ITEM_CS)) ||
-        (this->actionFunc == DoorShutter_SetupType)) {
+    if (DoorShutter_AnyActivePlayerCanUpdate(play) || (this->actionFunc == DoorShutter_SetupType)) {
         this->actionFunc(this, play);
     }
 }

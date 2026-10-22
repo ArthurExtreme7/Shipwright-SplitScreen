@@ -293,14 +293,19 @@ void ObjTsubo_Idle(ObjTsubo* this, PlayState* play) {
         Player* fallbackPlayer = GET_PLAYER(play);
         Player* nearestPlayer = NULL;
         f32 minDistSq = 1.0e20f;
+        f32 bestScore = 1.0e20f;
         s16 yawTowardsNearestPlayer = 0;
         s32 sanity = 0;
 
+        // Weight vertical separation so a player on a different floor cannot win the
+        // interaction over one standing next to the pot.
         if ((fallbackPlayer != NULL) && (fallbackPlayer->actor.update != NULL)) {
             f32 dx = this->actor.world.pos.x - fallbackPlayer->actor.world.pos.x;
+            f32 dy = this->actor.world.pos.y - fallbackPlayer->actor.world.pos.y;
             f32 dz = this->actor.world.pos.z - fallbackPlayer->actor.world.pos.z;
 
             minDistSq = SQ(dx) + SQ(dz);
+            bestScore = minDistSq + (SQ(dy) * 4.0f);
             nearestPlayer = fallbackPlayer;
             yawTowardsNearestPlayer = Math_Vec3f_Yaw(&this->actor.world.pos, &fallbackPlayer->actor.world.pos);
         }
@@ -309,10 +314,13 @@ void ObjTsubo_Idle(ObjTsubo* this, PlayState* play) {
             if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
                 Player* player = (Player*)playerActor;
                 f32 dx = this->actor.world.pos.x - player->actor.world.pos.x;
+                f32 dy = this->actor.world.pos.y - player->actor.world.pos.y;
                 f32 dz = this->actor.world.pos.z - player->actor.world.pos.z;
                 f32 distSq = SQ(dx) + SQ(dz);
+                f32 score = distSq + (SQ(dy) * 4.0f);
 
-                if (distSq < minDistSq) {
+                if (score < bestScore) {
+                    bestScore = score;
                     minDistSq = distSq;
                     nearestPlayer = player;
                     yawTowardsNearestPlayer = Math_Vec3f_Yaw(&this->actor.world.pos, &player->actor.world.pos);

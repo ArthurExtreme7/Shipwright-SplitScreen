@@ -320,7 +320,18 @@ s32 func_80078E84(PlayState* play) {
         interfaceCtx->unk_226 -= 0x10;
         if (interfaceCtx->unk_226 <= 0) {
             interfaceCtx->unk_226 = 0;
-            play->damagePlayer(play, GET_PLAYER(play), -(gSaveContext.health + 1));
+            Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+            s32 sanity = 0;
+            while ((playerActor != NULL) && (sanity < 2000)) {
+                if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+                    Player* player = (Player*)playerActor;
+                    if (Player_IsTargetable(player)) {
+                        play->damagePlayer(play, player, -(gSaveContext.health + 1));
+                    }
+                }
+                playerActor = playerActor->next;
+                sanity++;
+            }
             return 1;
         }
     }

@@ -766,14 +766,26 @@ void Player_ClearZTargeting(Player* this) {
  * when it switches from "friendly" mode to "hostile" mode.
  */
 void Player_SetAutoLockOnActor(PlayState* play, Actor* actor) {
-    Player* this = GET_PLAYER(play);
+    Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    s32 sanity = 0;
 
-    Player_ClearZTargeting(this);
-    this->focusActor = actor;
-    this->autoLockOnActor = actor;
-    this->stateFlags1 |= PLAYER_STATE1_FRIENDLY_ACTOR_FOCUS;
-    Camera_SetParam(Play_GetCamera(play, 0), 8, actor);
-    Camera_ChangeMode(Play_GetCamera(play, 0), 2);
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
+
+            if (Player_IsTargetable(player)) {
+                Player_ClearZTargeting(player);
+                player->focusActor = actor;
+                player->autoLockOnActor = actor;
+                player->stateFlags1 |= PLAYER_STATE1_FRIENDLY_ACTOR_FOCUS;
+                Camera_SetParam(Play_GetCamera(play, 0), 8, actor);
+                Camera_ChangeMode(Play_GetCamera(play, 0), 2);
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
 }
 
 s32 func_8008EF30(PlayState* play) {
@@ -818,23 +830,65 @@ s32 Player_GetStrength(void) {
 }
 
 u8 Player_GetMask(PlayState* play) {
-    Player* this = GET_PLAYER(play);
+    Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    s32 sanity = 0;
 
-    return this->currentMask;
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
+
+            if (Player_IsTargetable(player) && (player->currentMask != PLAYER_MASK_NONE)) {
+                return player->currentMask;
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
+
+    return PLAYER_MASK_NONE;
 }
 
 Player* Player_UnsetMask(PlayState* play) {
-    Player* this = GET_PLAYER(play);
+    Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    s32 sanity = 0;
+    Player* lastPlayer = NULL;
 
-    this->currentMask = PLAYER_MASK_NONE;
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
 
-    return this;
+            if (Player_IsTargetable(player)) {
+                player->currentMask = PLAYER_MASK_NONE;
+                lastPlayer = player;
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
+
+    return lastPlayer;
 }
 
 s32 Player_HasMirrorShieldEquipped(PlayState* play) {
-    Player* this = GET_PLAYER(play);
+    Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    s32 sanity = 0;
 
-    return (this->currentShield == PLAYER_SHIELD_MIRROR);
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
+
+            if (Player_IsTargetable(player) && (player->currentShield == PLAYER_SHIELD_MIRROR)) {
+                return true;
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
+
+    return false;
 }
 
 s32 Player_HasMirrorShieldSetToDraw(PlayState* play) {

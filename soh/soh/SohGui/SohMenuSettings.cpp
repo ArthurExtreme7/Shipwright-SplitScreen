@@ -60,9 +60,6 @@ static const std::map<int32_t, const char*> bootSequenceLabels = {
     { BOOTSEQUENCE_WARPPOINT, "Warp Point" },
 };
 
-static s32 sLocalMPPlayerCountBeforeEdit = 2;
-static s32 sLocalMPPlayerCountWarningTarget = 2;
-
 const char* GetGameVersionString(uint32_t index) {
     uint32_t gameVersion = ResourceMgr_GetGameVersion(index);
     switch (gameVersion) {
@@ -118,7 +115,7 @@ static void ApplyLocalMultiplayerDefaultsIfNeeded() {
     const char* defaultsVersionCvar = CVAR_ENHANCEMENT("LocalMultiplayer.SettingsDefaultsVersion");
     s32 defaultsVersion = CVarGetInteger(defaultsVersionCvar, 0);
 
-    if (defaultsVersion >= 3) {
+    if (defaultsVersion >= 4) {
         return;
     }
 
@@ -148,7 +145,11 @@ static void ApplyLocalMultiplayerDefaultsIfNeeded() {
         CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.ControlledEnemyScaling"), 0);
     }
 
-    CVarSetInteger(defaultsVersionCvar, 3);
+    if (defaultsVersion < 4) {
+        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenFovBoost"), 15);
+    }
+
+    CVarSetInteger(defaultsVersionCvar, 4);
 
     Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
 }
@@ -648,40 +649,28 @@ void SohMenu::AddMenuLocalMultiplayer() {
             "When enabled, disables local multiplayer."));
     AddWidget(path, "Local Multiplayer Players: %d", WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"))
-        .PreFunc([](WidgetInfo& info) {
-            sLocalMPPlayerCountBeforeEdit = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
-        })
-        .Callback([](WidgetInfo& info) {
-            s32 newPlayerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
-
-            if ((sLocalMPPlayerCountBeforeEdit == 2) && (newPlayerCount >= 3)) {
-                sLocalMPPlayerCountWarningTarget = newPlayerCount;
-
-                // Revert immediately and only apply 3/4P if the user explicitly confirms.
-                CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), sLocalMPPlayerCountBeforeEdit);
-
-                SohGui::mModalWindow->RegisterPopup(
-                    "3-4P Warning",
-                    "the mod was not built on top of 3-4P gameplay, some crashes are bound to happen if you run "
-                    "this with splitscreen. are you sure you want to continue? if so, try enabling agressive "
-                    "performance mode",
-                    "Continue", "Cancel",
-                    []() {
-                        CVarSetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"),
-                                       sLocalMPPlayerCountWarningTarget);
-                        Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-                    },
-                    []() { Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame(); });
-
-                Ship::Context::GetInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
-            }
-        })
         .Options(IntSliderOptions()
                      .Min(1)
                      .Max(4)
                      .DefaultValue(2)
                      .Format("%d")
                      .Tooltip("Spawns/despawns local controllable players"));
+    AddWidget(path, "Allow Player 2-4 to Load Areas", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+
+            info.options->disabled = playerCount <= 1;
+            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
+        })
+        .Options(CheckboxOptions()
+                     .DefaultValue(false)
+                     .Tooltip("Allows players 2-4 to trigger area loading checks (like invisible exit boundaries).\n"
+                              "Useful for dungeon room transitions and connected area boundaries.\n\n"
+                              "This setting wasn't tested thoroughly, it probably has a lot of issues, use at your "
+                              "own risk."));
     AddWidget(path, "Custom Item System", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.OriginalItemSystem"))
         .PreFunc([](WidgetInfo& info) {
@@ -1030,6 +1019,25 @@ void SohMenu::AddMenuLocalMultiplayer() {
                               " - draws only player actors in secondary split viewports\n"
                               " - disables local multiplayer debug marker rendering\n\n"
                               "Best for preventing crashes in resource-heavy areas."));
+    AddWidget(path, "Split-Screen FOV Boost (3/4 Players): %d %%", WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenFovBoost"))
+        .PreFunc([](WidgetInfo& info) {
+            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
+                                  ? 1
+                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
+            bool splitScreenEnabled = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreen"), 1) != 0;
+
+            info.options->disabled = (playerCount < 3) || !splitScreenEnabled;
+            info.options->disabledTooltip = "Requires 3 or more players with split-screen enabled.";
+        })
+        .Options(IntSliderOptions()
+                     .Min(0)
+                     .Max(50)
+                     .DefaultValue(15)
+                     .ShowButtons(true)
+                     .Tooltip("Widens the field of view per viewport in 3- and 4-player split-screen so players can "
+                              "see further.\n\nThe boost is applied once for 3-player and twice for 4-player.\n"
+                              "Default: 15% (3P: +15%, 4P: +30%)."));
     path = { "Local Multiplayer", "WIP/debug stuff", SECTION_COLUMN_1 };
 
     AddWidget(path, "Scale Room Enemy Spawns by Player Count", WIDGET_CVAR_CHECKBOX)
@@ -1102,21 +1110,6 @@ void SohMenu::AddMenuLocalMultiplayer() {
                               " - Dark Link\n"
                               " - Gerudo Thief\n\n"
                               "This mode ignores boss/miniboss scaling rules and uses only the whitelist."));
-    AddWidget(path, "Allow Player 2-4 to Load Areas", WIDGET_CVAR_CHECKBOX)
-        .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas"))
-        .PreFunc([](WidgetInfo& info) {
-            s32 playerCount = CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.Disable"), 0)
-                                  ? 1
-                                  : CVarGetInteger(CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount"), 2);
-
-            info.options->disabled = playerCount <= 1;
-            info.options->disabledTooltip = "Requires local multiplayer with 2 or more players.";
-        })
-        .Options(CheckboxOptions()
-                     .DefaultValue(false)
-                     .Tooltip("Allows players 2-4 to trigger area loading checks (like invisible exit boundaries).\n"
-                              "Useful for dungeon room transitions and connected area boundaries.\n"
-                              "Doesn't really work and disables player 2-4 teleporting to p1"));
     AddWidget(path, "Local Multiplayer Debug Markers", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("LocalMultiplayer.DebugMarkers"))
         .Options(CheckboxOptions()

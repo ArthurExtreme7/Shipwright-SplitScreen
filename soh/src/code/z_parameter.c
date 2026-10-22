@@ -8570,7 +8570,18 @@ void Interface_Draw(PlayState* play) {
                                 gSaveContext.timerState = TIMER_STATE_STOP;
                                 if (sEnvHazardActive) {
                                     gSaveContext.health = 0;
-                                    play->damagePlayer(play, GET_PLAYER(play), -(gSaveContext.health + 2));
+                                    Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+                                    s32 sanity = 0;
+                                    while ((playerActor != NULL) && (sanity < 2000)) {
+                                        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+                                            Player* player = (Player*)playerActor;
+                                            if (Player_IsTargetable(player)) {
+                                                play->damagePlayer(play, player, -(gSaveContext.health + 2));
+                                            }
+                                        }
+                                        playerActor = playerActor->next;
+                                        sanity++;
+                                    }
                                 }
                                 sEnvHazardActive = false;
                             } else if (gSaveContext.timerSeconds > 60) {

@@ -44,6 +44,7 @@ s32 OTRScene_ExecuteCommands(PlayState* play, SOH::Scene* scene);
 bool OTRfunc_800982FC(ObjectContext* objectCtx, s32 bankIndex, s16 objectId);
 
 #define LOCAL_MP_DISABLED_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.Disable")
+#define LOCAL_MP_PLAYER_COUNT_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.PlayerCount")
 #define LOCAL_MP_SECONDARY_AREA_LOAD_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas")
 #define LOCAL_MP_MAX_RETAINED_ROOMS 8
 
@@ -52,15 +53,37 @@ typedef struct {
     s32 roomNum;
     Room roomData;
     std::vector<s16> objectIds;
+    s32 disableWarpSongs;
 } OTRRetainedRoomEntry;
 
 std::array<OTRRetainedRoomEntry, LOCAL_MP_MAX_RETAINED_ROOMS> sRetainedRooms;
 s32 sRetainedRoomCount = 0;
 s32 sPendingObjectListRoomNum = -1;
 std::vector<s16> sPendingObjectList;
+s32 sPendingRoomStateRoomNum = -1;
+s32 sPendingDisableWarpSongs = 0;
+
+s32 OTRRoom_GetConfiguredPlayerCountInternal() {
+    s32 playerCount;
+
+    if (CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0)) {
+        return 1;
+    }
+
+    playerCount = CVarGetInteger(LOCAL_MP_PLAYER_COUNT_CVAR, 2);
+    if (playerCount < 1) {
+        return 1;
+    }
+    if (playerCount > 4) {
+        return 4;
+    }
+
+    return playerCount;
+}
 
 bool OTRRoom_AreaPersistenceEnabledInternal() {
-    return !CVarGetInteger(LOCAL_MP_DISABLED_CVAR, 0) && CVarGetInteger(LOCAL_MP_SECONDARY_AREA_LOAD_CVAR, 0);
+    return (OTRRoom_GetConfiguredPlayerCountInternal() > 1) &&
+           CVarGetInteger(LOCAL_MP_SECONDARY_AREA_LOAD_CVAR, 0);
 }
 
 s16 OTRRoom_NormalizeObjectId(s16 objectId) {
@@ -152,6 +175,26 @@ s32 OTRRoom_FindFreeObjectSlotInternal(const ObjectContext* objectCtx) {
     return -1;
 }
 
+// A retained room can only be fast-swapped into while all of its objects are still loaded.
+// Once its objects are released the room's actors are killed, so fast-swapping would skip the
+// room commands that respawn them and leave the room empty (and its transition actors invisible).
+bool OTRRoom_AreObjectsLoadedForRoomInternal(PlayState* play, const std::vector<s16>& objectList) {
+    for (s16 objectId : objectList) {
+        s32 slot;
+
+        if (objectId == OBJECT_INVALID) {
+            continue;
+        }
+
+        slot = Object_GetIndex(&play->objectCtx, OTRRoom_NormalizeObjectId(objectId));
+        if ((slot < 0) || (play->objectCtx.status[slot].id <= 0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void OTRRoom_MoveRetainedRoomToBackInternal(s32 retainedRoomIndex) {
     OTRRetainedRoomEntry movedRoom;
 
@@ -185,6 +228,7 @@ void OTRRoom_RemoveRetainedRoomAtInternal(s32 retainedRoomIndex) {
         sRetainedRooms[sRetainedRoomCount].roomData = {};
         sRetainedRooms[sRetainedRoomCount].roomData.num = -1;
         sRetainedRooms[sRetainedRoomCount].objectIds.clear();
+        sRetainedRooms[sRetainedRoomCount].disableWarpSongs = 0;
     }
 }
 
@@ -192,12 +236,15 @@ void OTRRoom_ClearRetainedStateInternal() {
     sRetainedRoomCount = 0;
     sPendingObjectListRoomNum = -1;
     sPendingObjectList.clear();
+    sPendingRoomStateRoomNum = -1;
+    sPendingDisableWarpSongs = 0;
 
     for (OTRRetainedRoomEntry& retainedRoom : sRetainedRooms) {
         retainedRoom.roomNum = -1;
         retainedRoom.roomData = {};
         retainedRoom.roomData.num = -1;
         retainedRoom.objectIds.clear();
+        retainedRoom.disableWarpSongs = 0;
     }
 }
 
@@ -276,6 +323,7 @@ void OTRRoom_StoreCurrentRoomDataInternal(PlayState* play) {
         retainedRoomIndex = sRetainedRoomCount++;
         sRetainedRooms[retainedRoomIndex].roomNum = roomNum;
         sRetainedRooms[retainedRoomIndex].objectIds.clear();
+        sRetainedRooms[retainedRoomIndex].disableWarpSongs = 0;
     } else {
         OTRRoom_MoveRetainedRoomToBackInternal(retainedRoomIndex);
         retainedRoomIndex = sRetainedRoomCount - 1;
@@ -283,9 +331,13 @@ void OTRRoom_StoreCurrentRoomDataInternal(PlayState* play) {
 
     sRetainedRooms[retainedRoomIndex].roomNum = roomNum;
     sRetainedRooms[retainedRoomIndex].roomData = play->roomCtx.curRoom;
+    sRetainedRooms[retainedRoomIndex].disableWarpSongs = play->msgCtx.disableWarpSongs;
 
     if (sPendingObjectListRoomNum == roomNum) {
         sRetainedRooms[retainedRoomIndex].objectIds = sPendingObjectList;
+    }
+    if (sPendingRoomStateRoomNum == roomNum) {
+        sRetainedRooms[retainedRoomIndex].disableWarpSongs = sPendingDisableWarpSongs;
     }
 }
 
@@ -337,6 +389,17 @@ extern "C" s32 OTRRoom_IsRetainedRoom(s32 roomNum) {
     }
 
     return OTRRoom_FindRetainedRoomIndexInternal(roomNum) >= 0;
+}
+
+// Used by actor spawning and room drawing to avoid touching retained rooms whose objects are
+// currently released. Their actors have been killed and their transition actors must not be
+// respawned with a fallback object, otherwise doors/actors exist but are invisible.
+extern "C" s32 OTRRoom_ShouldKeepRoomObjectsLoaded(PlayState* play, s32 roomNum) {
+    if (!OTRRoom_AreaPersistenceEnabledInternal()) {
+        return 0;
+    }
+
+    return OTRRoom_ShouldKeepRoomObjectsLoadedInternal(play, roomNum) ? 1 : 0;
 }
 
 extern "C" s32 OTRRoom_GetRetainedRoomCount(void) {
@@ -437,6 +500,11 @@ bool Scene_CommandRoomBehavior(PlayState* play, SOH::ISceneCommand* cmd) {
     play->roomCtx.curRoom.behaviorType2 = cmdRoom->roomBehavior.gameplayFlags2 & 0xFF;
     play->roomCtx.curRoom.lensMode = (cmdRoom->roomBehavior.gameplayFlags2 >> 8) & 1;
     play->msgCtx.disableWarpSongs = (cmdRoom->roomBehavior.gameplayFlags2 >> 0xA) & 1;
+
+    if (OTRRoom_AreaPersistenceEnabledInternal() && (play->roomCtx.curRoom.num >= 0)) {
+        sPendingRoomStateRoomNum = play->roomCtx.curRoom.num;
+        sPendingDisableWarpSongs = play->msgCtx.disableWarpSongs;
+    }
 
     return false;
 }
@@ -820,18 +888,35 @@ extern "C" s32 OTRfunc_8009728C(PlayState* play, RoomContext* roomCtx, s32 roomN
             s32 retainedRoomIndex = OTRRoom_FindRetainedRoomIndexInternal(roomNum);
 
             if (retainedRoomIndex >= 0) {
-                roomCtx->prevRoom = roomCtx->curRoom;
-                OTRRoom_MoveRetainedRoomToBackInternal(retainedRoomIndex);
-                roomCtx->curRoom = sRetainedRooms[sRetainedRoomCount - 1].roomData;
-                roomCtx->status = 0;
-                roomCtx->roomToLoad = NULL;
+                OTRRetainedRoomEntry& retainedRoom = sRetainedRooms[retainedRoomIndex];
 
-                if (roomCtx->curRoom.segment != NULL) {
-                    gSegments[3] = VIRTUAL_TO_PHYSICAL(roomCtx->curRoom.segment);
+                if (OTRRoom_AreObjectsLoadedForRoomInternal(play, retainedRoom.objectIds)) {
+                    s32 retainedDisableWarpSongs = retainedRoom.disableWarpSongs;
+
+                    roomCtx->prevRoom = roomCtx->curRoom;
+                    OTRRoom_MoveRetainedRoomToBackInternal(retainedRoomIndex);
+                    roomCtx->curRoom = sRetainedRooms[sRetainedRoomCount - 1].roomData;
+                    roomCtx->status = 0;
+                    roomCtx->roomToLoad = NULL;
+                    play->msgCtx.disableWarpSongs = retainedDisableWarpSongs;
+
+                    if (roomCtx->curRoom.segment != NULL) {
+                        gSegments[3] = VIRTUAL_TO_PHYSICAL(roomCtx->curRoom.segment);
+                    }
+
+                    // The fast swap skips the room commands, so bring the object context back in
+                    // sync with the rooms that must stay loaded for this swap.
+                    OTRRoom_RebuildObjectContextInternal(play);
+                    Player_SetBootData(play, GET_PLAYER(play));
+
+                    SPDLOG_INFO("Room Fast Swap - curRoom.num: {0:#x}", roomCtx->curRoom.num);
+                    return 1;
                 }
 
-                SPDLOG_INFO("Room Fast Swap - curRoom.num: {0:#x}", roomCtx->curRoom.num);
-                return 1;
+                // Its objects were released while it was retained, so its actors are gone. Fall
+                // back to a normal room load below so the room commands respawn everything.
+                OTRRoom_RemoveRetainedRoomAtInternal(retainedRoomIndex);
+                func_80031B14(play, &play->actorCtx);
             }
         }
 
@@ -857,6 +942,8 @@ extern "C" s32 OTRfunc_8009728C(PlayState* play, RoomContext* roomCtx, s32 roomN
 
         sPendingObjectListRoomNum = -1;
         sPendingObjectList.clear();
+        sPendingRoomStateRoomNum = -1;
+        sPendingDisableWarpSongs = 0;
 
         roomCtx->unk_30 ^= 1;
 

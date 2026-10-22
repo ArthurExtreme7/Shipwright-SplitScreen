@@ -1741,6 +1741,73 @@ static s32 Actor_IsEnemyCategory(const Actor* actor) {
     return (actor->category == ACTORCAT_ENEMY) || (actor->category == ACTORCAT_BOSS);
 }
 
+// In split-screen, actors must only be frozen when every active player is in a frozen state.
+// Using player 1's flags globally would freeze actors in the other viewports whenever P1 talks,
+// reads a textbox, or gets an item.
+static u32 Actor_GetCommonActivePlayerStateFlags1(PlayState* play) {
+    Actor* playerActor;
+    Player* mainPlayer;
+    u32 commonFlags = 0;
+    s32 foundPlayer = false;
+    s32 sanity = 0;
+
+    if (play == NULL) {
+        return 0;
+    }
+
+    mainPlayer = GET_PLAYER(play);
+    playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
+
+            if (!foundPlayer) {
+                commonFlags = player->stateFlags1;
+                foundPlayer = true;
+            } else {
+                commonFlags &= player->stateFlags1;
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
+
+    if (!foundPlayer && (mainPlayer != NULL)) {
+        return mainPlayer->stateFlags1;
+    }
+
+    return commonFlags;
+}
+
+static s32 Actor_IsTalkActorOfAnyActivePlayer(PlayState* play, Actor* actor) {
+    Actor* playerActor;
+    s32 sanity = 0;
+
+    if ((play == NULL) || (actor == NULL)) {
+        return false;
+    }
+
+    playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
+
+            if ((player->stateFlags1 & PLAYER_STATE1_TALKING) && ((player->actor.textId & 0xFF00) != 0x600) &&
+                (player->talkActor == actor)) {
+                return true;
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
+
+    return false;
+}
+
 static s32 Actor_IsRoomOccupiedByAnyActivePlayer(PlayState* play, s32 roomNum) {
     Actor* playerActor;
     s32 sanity = 0;
@@ -1879,27 +1946,78 @@ s32 func_8002DEEC(Player* player) {
     return (player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_IN_CUTSCENE)) || (player->csAction != 0);
 }
 
-void func_8002DF18(PlayState* play, Player* player) {
-    func_8006DC68(play, player);
+s32 Player_IsTargetable(Player* player) {
+    return (player != NULL) && (player->actor.update != NULL) &&
+           !(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_IN_CUTSCENE));
 }
 
-s32 func_8002DF38(PlayState* play, Actor* actor, u8 csAction) {
-    Player* player = GET_PLAYER(play);
+// A player that can be given a new `csAction`. Unlike `Player_IsTargetable`, this does not
+// reject players that are already in a cutscene action, because `csAction` updates must keep
+// being delivered for the duration of a cutscene/door animation. Gating those updates on
+// `PLAYER_STATE1_IN_CUTSCENE` (which the first halted-actor action sets) permanently locks the
+// player in the first action, since the flag can only be cleared by ending that action.
+s32 Player_CanReceiveCsAction(Player* player) {
+    return (player != NULL) && (player->actor.update != NULL) &&
+           !(player->stateFlags1 & PLAYER_STATE1_DEAD);
+}
 
-    player->csAction = csAction;
+s32 Player_SetCsActionForPlayer(Player* player, Actor* actor, u8 csMode) {
+    if (player == NULL) {
+        return false;
+    }
+
+    player->csAction = csMode;
     player->csActor = actor;
     player->cv.haltActorsDuringCsAction = false;
 
     return true;
 }
 
+void func_8002DF18(PlayState* play, Player* player) {
+    func_8006DC68(play, player);
+}
+
+s32 func_8002DF38(PlayState* play, Actor* actor, u8 csAction) {
+    Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    s32 sanity = 0;
+    s32 result = false;
+
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
+
+            if (Player_CanReceiveCsAction(player)) {
+                result |= Player_SetCsActionForPlayer(player, actor, csAction);
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
+
+    return result;
+}
+
 s32 Player_SetCsActionWithHaltedActors(PlayState* play, Actor* actor, u8 csAction) {
-    Player* player = GET_PLAYER(play);
+    Actor* playerActor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
+    s32 sanity = 0;
+    s32 result = false;
 
-    func_8002DF38(play, actor, csAction);
-    player->cv.haltActorsDuringCsAction = true;
+    while ((playerActor != NULL) && (sanity < 2000)) {
+        if ((playerActor->id == ACTOR_PLAYER) && (playerActor->update != NULL)) {
+            Player* player = (Player*)playerActor;
 
-    return true;
+            if (Player_CanReceiveCsAction(player)) {
+                result |= Player_SetCsActionForPlayer(player, actor, csAction);
+                player->cv.haltActorsDuringCsAction = true;
+            }
+        }
+
+        playerActor = playerActor->next;
+        sanity++;
+    }
+
+    return result;
 }
 
 void func_8002DF90(DynaPolyActor* dynaActor) {
@@ -1918,7 +2036,8 @@ void func_8002DFA4(DynaPolyActor* dynaActor, f32 arg1, s16 arg2) {
  */
 s32 Player_IsFacingActor(Actor* actor, s16 maxAngle, PlayState* play) {
     Player* player = Actor_FindClosestActivePlayer(play, actor, GET_PLAYER(play));
-    s16 yawDiff = (s16)(actor->yawTowardsPlayer + 0x8000) - player->actor.shape.rot.y;
+    s16 yawTowardsPlayer = Actor_WorldYawTowardActor(actor, &player->actor);
+    s16 yawDiff = (s16)(yawTowardsPlayer + 0x8000) - player->actor.shape.rot.y;
 
     if (ABS(yawDiff) < maxAngle) {
         return true;
@@ -2366,17 +2485,21 @@ u32 Actor_ProcessTalkRequest(Actor* actor, PlayState* play) {
 
 s32 func_8002F1C4(Actor* actor, PlayState* play, f32 arg2, f32 arg3, u32 exchangeItemId) {
     Player* player = GET_PLAYER(play);
+    f32 xzDistToPlayer = Actor_WorldDistXZToActor(actor, &player->actor);
+    f32 yDistToPlayer = Actor_HeightDiff(actor, &player->actor);
 
+    // These distances are normally cached relative to the closest player. In split-screen that
+    // may be a different player, so compute them against the player being offered the talk.
     // This is convoluted but it seems like it must be a single if statement to match
     if ((player->actor.flags & ACTOR_FLAG_TALK) || ((exchangeItemId != EXCH_ITEM_NONE) && Player_InCsMode(play)) ||
         (!actor->isTargeted &&
-         ((arg3 < fabsf(actor->yDistToPlayer)) || (player->talkActorDistance < actor->xzDistToPlayer) ||
-          (arg2 < actor->xzDistToPlayer)))) {
+         ((arg3 < fabsf(yDistToPlayer)) || (player->talkActorDistance < xzDistToPlayer) ||
+          (arg2 < xzDistToPlayer)))) {
         return false;
     }
 
     player->talkActor = actor;
-    player->talkActorDistance = actor->xzDistToPlayer;
+    player->talkActorDistance = xzDistToPlayer;
     player->exchangeItemId = exchangeItemId;
 
     return true;
@@ -2478,6 +2601,9 @@ s32 GiveItemEntryWithoutActor(PlayState* play, GetItemEntry getItemEntry) {
  */
 s32 GiveItemEntryFromActor(Actor* actor, PlayState* play, GetItemEntry getItemEntry, f32 xzRange, f32 yRange) {
     Player* player = GET_PLAYER(play);
+    f32 xzDistToPlayer = Actor_WorldDistXZToActor(actor, &player->actor);
+    f32 yDistToPlayer = Actor_HeightDiff(actor, &player->actor);
+    s16 yawTowardsPlayer = Actor_WorldYawTowardActor(actor, &player->actor);
 
     if (!(player->stateFlags1 &
           (PLAYER_STATE1_DEAD | PLAYER_STATE1_CHARGING_SPIN_ATTACK | PLAYER_STATE1_HANGING_OFF_LEDGE |
@@ -2488,8 +2614,8 @@ s32 GiveItemEntryFromActor(Actor* actor, PlayState* play, GetItemEntry getItemEn
              ((!IS_RANDO && ((getItemEntry.getItemId > GI_NONE) && (getItemEntry.getItemId < GI_MAX))) ||
               (IS_RANDO && ((getItemEntry.getItemId > RG_NONE) && (getItemEntry.getItemId < RG_MAX))))) ||
             (!(player->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_CUTSCENE)))) {
-            if ((actor->xzDistToPlayer < xzRange) && (fabsf(actor->yDistToPlayer) < yRange)) {
-                s16 yawDiff = actor->yawTowardsPlayer - player->actor.shape.rot.y;
+            if ((xzDistToPlayer < xzRange) && (fabsf(yDistToPlayer) < yRange)) {
+                s16 yawDiff = yawTowardsPlayer - player->actor.shape.rot.y;
                 s32 absYawDiff = ABS(yawDiff);
 
                 if ((getItemEntry.getItemId != GI_NONE) || (player->getItemDirection < absYawDiff)) {
@@ -2582,6 +2708,9 @@ s32 Actor_OfferGetItem(Actor* actor, PlayState* play, s32 getItemId, f32 xzRange
     }
 
     Player* player = GET_PLAYER(play);
+    f32 xzDistToPlayer = Actor_WorldDistXZToActor(actor, &player->actor);
+    f32 yDistToPlayer = Actor_HeightDiff(actor, &player->actor);
+    s16 yawTowardsPlayer = Actor_WorldYawTowardActor(actor, &player->actor);
 
     if (!(player->stateFlags1 &
           (PLAYER_STATE1_DEAD | PLAYER_STATE1_CHARGING_SPIN_ATTACK | PLAYER_STATE1_HANGING_OFF_LEDGE |
@@ -2592,8 +2721,8 @@ s32 Actor_OfferGetItem(Actor* actor, PlayState* play, s32 getItemId, f32 xzRange
              ((!IS_RANDO && ((getItemId > GI_NONE) && (getItemId < GI_MAX))) ||
               (IS_RANDO && ((getItemId > RG_NONE) && (getItemId < RG_MAX))))) ||
             (!(player->stateFlags1 & (PLAYER_STATE1_CARRYING_ACTOR | PLAYER_STATE1_IN_CUTSCENE)))) {
-            if ((actor->xzDistToPlayer < xzRange) && (fabsf(actor->yDistToPlayer) < yRange)) {
-                s16 yawDiff = actor->yawTowardsPlayer - player->actor.shape.rot.y;
+            if ((xzDistToPlayer < xzRange) && (fabsf(yDistToPlayer) < yRange)) {
+                s16 yawDiff = yawTowardsPlayer - player->actor.shape.rot.y;
                 s32 absYawDiff = ABS(yawDiff);
 
                 if ((getItemId != GI_NONE) || (player->getItemDirection < absYawDiff)) {
@@ -3052,15 +3181,15 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
     u32* sp80;
     u32 unkFlag;
     u32 unkCondition;
-    Actor* sp74;
+    u32 commonStateFlags1;
     ActorEntry* actorEntry;
     s32 i;
 
     player = GET_PLAYER(play);
     localMultiplayerRetainedUpdatesEnabled =
         OTRRoom_AreaPersistenceEnabled() && Actor_IsLocalMultiplayerActive(play);
+    commonStateFlags1 = Actor_GetCommonActivePlayerStateFlags1(play);
 
-    sp74 = NULL;
     unkFlag = 0;
 
     if (play->numSetupActors != 0) {
@@ -3108,12 +3237,8 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
         unkFlag = ACTOR_FLAG_UPDATE_DURING_OCARINA;
     }
 
-    if ((player->stateFlags1 & PLAYER_STATE1_TALKING) && ((player->actor.textId & 0xFF00) != 0x600)) {
-        sp74 = player->talkActor;
-    }
-
     for (i = 0; i < ARRAY_COUNT(actorCtx->actorLists); i++, sp80++) {
-        unkCondition = (*sp80 & player->stateFlags1);
+        unkCondition = (*sp80 & commonStateFlags1);
 
         actor = actorCtx->actorLists[i].head;
         while (actor != NULL) {
@@ -3142,8 +3267,9 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
                 Actor_Kill(actor);
                 actor = actor->next;
             } else if ((unkFlag && !(actor->flags & unkFlag)) ||
-                       (!unkFlag && unkCondition && (sp74 != actor) && (actor != player->naviActor) &&
-                        (actor != player->heldActor) && (&player->actor != actor->parent))) {
+                       (!unkFlag && unkCondition && !Actor_IsTalkActorOfAnyActivePlayer(play, actor) &&
+                        (actor != player->naviActor) && (actor != player->heldActor) &&
+                        (&player->actor != actor->parent))) {
                 CollisionCheck_ResetDamage(&actor->colChkInfo);
                 actor = actor->next;
             } else if (actor->update == NULL) {
@@ -3548,7 +3674,11 @@ s32 Ship_CalcShouldDrawAndUpdate(PlayState* play, Actor* actor, Vec3f* projected
 }
 // #endregion
 
-void func_800315AC(PlayState* play, ActorContext* actorCtx) {
+// `accumulateCulling` is used for split-screen, where this function runs once per player
+// viewport. The update pass (which happens once, next frame) needs to know if an actor was
+// visible to *any* player, not just the player whose viewport happened to be rendered last.
+// Draw culling still uses the result for the current viewport only.
+void func_800315AC(PlayState* play, ActorContext* actorCtx, s32 accumulateCulling) {
     s32 invisibleActorCounter;
     Actor* invisibleActors[INVISIBLE_ACTOR_MAX];
     ActorListEntry* actorListEntry;
@@ -3586,32 +3716,31 @@ void func_800315AC(PlayState* play, ActorContext* actorCtx) {
             // #region SOH [Enhancement] Extended culling updates
             bool shipShouldDraw = false;
             bool shipShouldUpdate = false;
+            bool insideCullingVolume = (actor->flags & ACTOR_FLAG_INSIDE_CULLING_VOLUME) != 0;
             if ((HREG(64) != 1) || ((HREG(65) != -1) && (HREG(65) != HREG(66))) || (HREG(70) == 0)) {
                 if (CVarGetInteger(CVAR_ENHANCEMENT("DisableDrawDistance"), 1) > 1 ||
                     CVarGetInteger(CVAR_ENHANCEMENT("WidescreenActorCulling"), 0)) {
                     Ship_CalcShouldDrawAndUpdate(play, actor, &actor->projectedPos, actor->projectedW, &shipShouldDraw,
                                                  &shipShouldUpdate);
-
-                    if (shipShouldUpdate) {
-                        actor->flags |= ACTOR_FLAG_INSIDE_CULLING_VOLUME;
-                    } else {
-                        actor->flags &= ~ACTOR_FLAG_INSIDE_CULLING_VOLUME;
-                    }
+                    insideCullingVolume = shipShouldUpdate;
                 } else {
-                    if (func_800314B0(play, actor)) {
-                        actor->flags |= ACTOR_FLAG_INSIDE_CULLING_VOLUME;
-                    } else {
-                        actor->flags &= ~ACTOR_FLAG_INSIDE_CULLING_VOLUME;
-                    }
+                    insideCullingVolume = func_800314B0(play, actor);
+                }
+
+                if (insideCullingVolume) {
+                    actor->flags |= ACTOR_FLAG_INSIDE_CULLING_VOLUME;
+                } else if (!accumulateCulling) {
+                    actor->flags &= ~ACTOR_FLAG_INSIDE_CULLING_VOLUME;
                 }
             }
 
-            actor->isDrawn = false;
+            if (!accumulateCulling) {
+                actor->isDrawn = false;
+            }
 
             if ((HREG(64) != 1) || ((HREG(65) != -1) && (HREG(65) != HREG(66))) || (HREG(71) == 0)) {
                 if ((actor->init == NULL) && (actor->draw != NULL) &&
-                    ((actor->flags & (ACTOR_FLAG_DRAW_CULLING_DISABLED | ACTOR_FLAG_INSIDE_CULLING_VOLUME)) ||
-                     shipShouldDraw)) {
+                    ((actor->flags & ACTOR_FLAG_DRAW_CULLING_DISABLED) || insideCullingVolume || shipShouldDraw)) {
                     // #endregion
                     if ((actor->flags & ACTOR_FLAG_REACT_TO_LENS) &&
                         ((play->roomCtx.curRoom.lensMode == LENS_MODE_HIDE_ACTORS) || play->actorCtx.lensActive ||
@@ -3966,17 +4095,19 @@ void Actor_SpawnTransitionActors(PlayState* play, ActorContext* actorCtx) {
             s32 shouldSpawnTransitionActor = 0;
 
             if (OTRRoom_AreaPersistenceEnabled()) {
-            shouldSpawnTransitionActor =
-                ((transitionActor->sides[0].room >= 0) && OTRRoom_IsRetainedRoom(transitionActor->sides[0].room)) ||
-                ((transitionActor->sides[1].room >= 0) && OTRRoom_IsRetainedRoom(transitionActor->sides[1].room));
+                shouldSpawnTransitionActor =
+                    ((transitionActor->sides[0].room >= 0) &&
+                     OTRRoom_ShouldKeepRoomObjectsLoaded(play, transitionActor->sides[0].room)) ||
+                    ((transitionActor->sides[1].room >= 0) &&
+                     OTRRoom_ShouldKeepRoomObjectsLoaded(play, transitionActor->sides[1].room));
             } else {
-            shouldSpawnTransitionActor =
-                ((transitionActor->sides[0].room >= 0) &&
-                 ((transitionActor->sides[0].room == play->roomCtx.curRoom.num) ||
-                  (transitionActor->sides[0].room == play->roomCtx.prevRoom.num))) ||
-                ((transitionActor->sides[1].room >= 0) &&
-                 ((transitionActor->sides[1].room == play->roomCtx.curRoom.num) ||
-                  (transitionActor->sides[1].room == play->roomCtx.prevRoom.num)));
+                shouldSpawnTransitionActor =
+                    ((transitionActor->sides[0].room >= 0) &&
+                     ((transitionActor->sides[0].room == play->roomCtx.curRoom.num) ||
+                      (transitionActor->sides[0].room == play->roomCtx.prevRoom.num))) ||
+                    ((transitionActor->sides[1].room >= 0) &&
+                     ((transitionActor->sides[1].room == play->roomCtx.curRoom.num) ||
+                      (transitionActor->sides[1].room == play->roomCtx.prevRoom.num)));
             }
 
             if (shouldSpawnTransitionActor) {
@@ -6896,10 +7027,15 @@ s32 func_80037CB8(PlayState* play, Actor* actor, s16 arg2) {
 }
 
 s32 func_80037D98(PlayState* play, Actor* actor, s16 arg2, s32* arg3) {
+    Player* player = GET_PLAYER(play);
     s16 var;
     s16 sp2C;
     s16 sp2A;
     s16 abs_var;
+    f32 xzDistToPlayer = Actor_WorldDistXZToActor(actor, &player->actor);
+    f32 yDistToPlayer = Actor_HeightDiff(actor, &player->actor);
+    f32 xyzDistToPlayerSq = SQ(xzDistToPlayer) + SQ(yDistToPlayer);
+    s16 yawTowardsPlayer = Actor_WorldYawTowardActor(actor, &player->actor);
 
     if (Actor_ProcessTalkRequest(actor, play)) {
         *arg3 = 1;
@@ -6919,18 +7055,18 @@ s32 func_80037D98(PlayState* play, Actor* actor, s16 arg2, s32* arg3) {
         return false;
     }
 
-    var = actor->yawTowardsPlayer - actor->shape.rot.y;
+    var = yawTowardsPlayer - actor->shape.rot.y;
     abs_var = ABS(var);
 
     if (abs_var >= 0x4300) {
         return false;
     }
 
-    if ((actor->xyzDistToPlayerSq > SQ(160.0f)) && !actor->isTargeted) {
+    if ((xyzDistToPlayerSq > SQ(160.0f)) && !actor->isTargeted) {
         return false;
     }
 
-    if (actor->xyzDistToPlayerSq <= SQ(80.0f)) {
+    if (xyzDistToPlayerSq <= SQ(80.0f)) {
         if (func_8002F2CC(actor, play, 80.0f)) {
             actor->textId = func_80037C30(play, arg2);
         }
@@ -6981,13 +7117,14 @@ s32 func_80038154(PlayState* play, Actor* actor, Vec3s* arg2, Vec3s* arg3, f32 a
     Vec3f sp2C;
     s16 var;
     s16 abs_var;
+    s16 yawTowardsPlayer = Actor_WorldYawTowardActor(actor, &player->actor);
 
     actor->focus.pos = actor->world.pos;
     actor->focus.pos.y += arg4;
 
     if (!(((play->csCtx.state != CS_STATE_IDLE) || (gDbgCamEnabled)) &&
           (gSaveContext.entranceIndex == ENTR_KOKIRI_FOREST_0))) {
-        var = actor->yawTowardsPlayer - actor->shape.rot.y;
+        var = yawTowardsPlayer - actor->shape.rot.y;
         abs_var = ABS(var);
         if (abs_var >= 0x4300) {
             func_80037F30(arg2, arg3);
@@ -7013,12 +7150,13 @@ s32 func_80038290(PlayState* play, Actor* actor, Vec3s* arg2, Vec3s* arg3, Vec3f
     Vec3f sp24;
     s16 var;
     s16 abs_var;
+    s16 yawTowardsPlayer = Actor_WorldYawTowardActor(actor, &player->actor);
 
     actor->focus.pos = arg4;
 
     if (!(((play->csCtx.state != CS_STATE_IDLE) || (gDbgCamEnabled)) &&
           (gSaveContext.entranceIndex == ENTR_KOKIRI_FOREST_0))) {
-        var = actor->yawTowardsPlayer - actor->shape.rot.y;
+        var = yawTowardsPlayer - actor->shape.rot.y;
         abs_var = ABS(var);
         if (abs_var >= 0x4300) {
             func_80037F30(arg2, arg3);

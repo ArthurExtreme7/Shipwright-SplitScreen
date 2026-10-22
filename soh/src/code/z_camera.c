@@ -925,6 +925,17 @@ s16 Camera_XZAngle(Vec3f* to, Vec3f* from) {
 f32 D_8015CE50;
 f32 D_8015CE54;
 CamColChk D_8015CE58;
+
+typedef struct {
+    f32 floorYBehind;
+    f32 floorYFront;
+    CamColChk bgCheck;
+    s16 uid;
+    bool valid;
+} SplitScreenFloorCache;
+
+static SplitScreenFloorCache sSplitScreenFloorCache[NUM_CAMS];
+
 s16 func_80044ADC(Camera* camera, s16 yaw, s16 arg2) {
     Vec3f playerPos;
     Vec3f rotatedPos;
@@ -940,6 +951,20 @@ s16 func_80044ADC(Camera* camera, s16 yaw, s16 arg2) {
     f32 sp2C;
     f32 phi_f16;
     f32 playerHeight;
+    f32* floorYBehind = &D_8015CE50;
+    f32* floorYFront = &D_8015CE54;
+    CamColChk* bgCheck = &D_8015CE58;
+    SplitScreenFloorCache* cache = NULL;
+    bool cacheValid;
+
+    if ((camera->thisIdx >= SUBCAM_FIRST) && (camera->thisIdx < NUM_CAMS)) {
+        cache = &sSplitScreenFloorCache[camera->thisIdx];
+        floorYBehind = &cache->floorYBehind;
+        floorYFront = &cache->floorYFront;
+        bgCheck = &cache->bgCheck;
+    }
+
+    cacheValid = (cache != NULL) && cache->valid && (cache->uid == camera->uid);
 
     sinYaw = Math_SinS(yaw);
     cosYaw = Math_CosS(yaw);
@@ -953,37 +978,41 @@ s16 func_80044ADC(Camera* camera, s16 yaw, s16 arg2) {
     rotatedPos.x = playerPos.x + (sp30 * sinYaw);
     rotatedPos.y = playerPos.y;
     rotatedPos.z = playerPos.z + (sp30 * cosYaw);
-    if (arg2 || (camera->play->state.frames % 2) == 0) {
-        D_8015CE58.pos.x = playerPos.x + (sp2C * sinYaw);
-        D_8015CE58.pos.y = playerPos.y;
-        D_8015CE58.pos.z = playerPos.z + (sp2C * cosYaw);
-        Camera_BGCheckInfo(camera, &playerPos, &D_8015CE58);
+    if (arg2 || (camera->play->state.frames % 2) == 0 || ((cache != NULL) && !cacheValid)) {
+        bgCheck->pos.x = playerPos.x + (sp2C * sinYaw);
+        bgCheck->pos.y = playerPos.y;
+        bgCheck->pos.z = playerPos.z + (sp2C * cosYaw);
+        Camera_BGCheckInfo(camera, &playerPos, bgCheck);
         if (arg2) {
-            D_8015CE50 = D_8015CE54 = camera->playerGroundY;
+            *floorYBehind = *floorYFront = camera->playerGroundY;
+        }
+        if (cache != NULL) {
+            cache->uid = camera->uid;
+            cache->valid = true;
         }
     } else {
-        sp2C = OLib_Vec3fDistXZ(&playerPos, &D_8015CE58.pos);
-        D_8015CE58.pos.x += D_8015CE58.norm.x * 5.0f;
-        D_8015CE58.pos.y += D_8015CE58.norm.y * 5.0f;
-        D_8015CE58.pos.z += D_8015CE58.norm.z * 5.0f;
+        sp2C = OLib_Vec3fDistXZ(&playerPos, &bgCheck->pos);
+        bgCheck->pos.x += bgCheck->norm.x * 5.0f;
+        bgCheck->pos.y += bgCheck->norm.y * 5.0f;
+        bgCheck->pos.z += bgCheck->norm.z * 5.0f;
         if (sp2C < sp30) {
             sp30 = sp2C;
-            D_8015CE50 = D_8015CE54 = Camera_GetFloorYLayer(camera, &floorNorm, &D_8015CE58.pos, &bgId);
+            *floorYBehind = *floorYFront = Camera_GetFloorYLayer(camera, &floorNorm, &bgCheck->pos, &bgId);
         } else {
-            D_8015CE50 = Camera_GetFloorYLayer(camera, &floorNorm, &rotatedPos, &bgId);
-            D_8015CE54 = Camera_GetFloorYLayer(camera, &floorNorm, &D_8015CE58.pos, &bgId);
+            *floorYBehind = Camera_GetFloorYLayer(camera, &floorNorm, &rotatedPos, &bgId);
+            *floorYFront = Camera_GetFloorYLayer(camera, &floorNorm, &bgCheck->pos, &bgId);
         }
 
-        if (D_8015CE50 == BGCHECK_Y_MIN) {
-            D_8015CE50 = camera->playerGroundY;
+        if (*floorYBehind == BGCHECK_Y_MIN) {
+            *floorYBehind = camera->playerGroundY;
         }
 
-        if (D_8015CE54 == BGCHECK_Y_MIN) {
-            D_8015CE54 = D_8015CE50;
+        if (*floorYFront == BGCHECK_Y_MIN) {
+            *floorYFront = *floorYBehind;
         }
     }
-    phi_f16 = PCT(OREG(20)) * (D_8015CE50 - camera->playerGroundY);
-    phi_f18 = (1.0f - PCT(OREG(20))) * (D_8015CE54 - camera->playerGroundY);
+    phi_f16 = PCT(OREG(20)) * (*floorYBehind - camera->playerGroundY);
+    phi_f18 = (1.0f - PCT(OREG(20))) * (*floorYFront - camera->playerGroundY);
     temp_s0 = DEGF_TO_BINANG(RADF_TO_DEGF(Math_FAtan2F(phi_f16, sp30)));
     temp_s1 = DEGF_TO_BINANG(RADF_TO_DEGF(Math_FAtan2F(phi_f18, sp2C)));
     return temp_s0 + temp_s1;

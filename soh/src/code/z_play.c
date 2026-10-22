@@ -48,6 +48,7 @@ void Actor_Draw(PlayState* play, Actor* actor);
 #define LOCAL_MP_TELEPORT_TARGET_PORT_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.TeleportTargetPlayer")
 #define LOCAL_MP_TELEPORT_REQUEST_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.TeleportAllToSelectedRequest")
 #define LOCAL_MP_SECONDARY_AREA_LOAD_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SecondaryPlayersLoadAreas")
+#define LOCAL_MP_SPLITSCREEN_FOV_BOOST_CVAR CVAR_ENHANCEMENT("LocalMultiplayer.SplitScreenFovBoost")
 
 static u8 sLocalMPPrevTransitionTrigger = TRANS_TRIGGER_OFF;
 
@@ -68,6 +69,7 @@ typedef struct LocalMPCameraState {
 
 static LocalMPCameraState sLocalMPCameraState;
 static s16 sLocalMPSplitCamIds[3] = { SUBCAM_NONE, SUBCAM_NONE, SUBCAM_NONE };
+static u8 sLocalMPSplitCamSeparated[NUM_CAMS];
 static u16 sMergedStartPrevCur = 0;
 static s32 sLocalMPLastTeleportRequest = 0;
 static s32 sLocalMPLastMainRoom = -1;
@@ -421,6 +423,26 @@ static Player* LocalMP_SpawnPlayer(PlayState* play, Player* mainPlayer, s32 cont
     return player;
 }
 
+// A local player's Navi is a separate actor that is not owned by the player actor, so killing
+// the player leaves the fairy alive. It would then fall back to following player 1, and every
+// add/remove cycle would leave another orphaned fairy behind. Detach and kill it along with the
+// player that owns it.
+static void LocalMP_KillPlayerAndNavi(Player* player) {
+    if (player == NULL) {
+        return;
+    }
+
+    if (player->naviActor != NULL) {
+        // Clear the parent first: the player actor is freed before item-action actors, and the
+        // fairy's destructor resolves its owner through this pointer.
+        player->naviActor->parent = NULL;
+        Actor_Kill(player->naviActor);
+        player->naviActor = NULL;
+    }
+
+    Actor_Kill(&player->actor);
+}
+
 static void LocalMP_EnsurePlayers(PlayState* play) {
     Player* mainPlayer;
     bool seenPorts[5] = { false, false, false, false, false };
@@ -445,7 +467,7 @@ static void LocalMP_EnsurePlayers(PlayState* play) {
             if ((actor->id == ACTOR_PLAYER) && (actor != play->actorCtx.actorLists[ACTORCAT_PLAYER].head)) {
                 Player* player = (Player*)actor;
                 if ((player->controllerPort >= 2) && (player->controllerPort <= 4)) {
-                    Actor_Kill(actor);
+                    LocalMP_KillPlayerAndNavi(player);
                 }
             }
 
@@ -482,7 +504,7 @@ static void LocalMP_EnsurePlayers(PlayState* play) {
 
             if ((controllerPort < 2) || (controllerPort > desiredPlayers) || (controllerPort > 4) ||
                 seenPorts[controllerPort]) {
-                Actor_Kill(actor);
+                LocalMP_KillPlayerAndNavi(player);
             } else {
                 seenPorts[controllerPort] = true;
                 player->isSecondPlayer = true;
@@ -668,6 +690,8 @@ static s32 LocalMP_CollectPlayersByPort(PlayState* play, Player* players[4]) {
 static void LocalMP_ClearSplitScreenCameras(PlayState* play) {
     s32 i;
 
+    memset(sLocalMPSplitCamSeparated, 0, sizeof(sLocalMPSplitCamSeparated));
+
     for (i = 0; i < ARRAY_COUNT(sLocalMPSplitCamIds); i++) {
         s16 camId = sLocalMPSplitCamIds[i];
 
@@ -715,6 +739,15 @@ static void LocalMP_SyncSplitCamera(Camera* splitCam, Camera* mainCam, Player* p
 
     if (splitCam->player != player) {
         Camera_InitPlayerSettings(splitCam, player);
+
+        // This camera was copied from P1 when it was created. Drop P1's floor-specific
+        // background camera data so Camera_Update can pick the correct data for this player.
+        splitCam->camDataIdx = -1;
+        splitCam->prevCamDataIdx = -1;
+        splitCam->nextCamDataIdx = -1;
+        if ((splitCam->thisIdx >= 0) && (splitCam->thisIdx < NUM_CAMS)) {
+            sLocalMPSplitCamSeparated[splitCam->thisIdx] = false;
+        }
     }
 
     // Camera data/settings are player-specific while swimming or underwater. Copying P1's water
@@ -723,11 +756,37 @@ static void LocalMP_SyncSplitCamera(Camera* splitCam, Camera* mainCam, Player* p
         return;
     }
 
-    if ((mainCam->camDataIdx >= 0) && (splitCam->camDataIdx != mainCam->camDataIdx)) {
-        Camera_ChangeDataIdx(splitCam, mainCam->camDataIdx);
-    } else if ((splitCam->setting != mainCam->setting) &&
-               !LocalMP_IsCameraSettingPlayerAnimation(mainCam->setting) &&
-               !LocalMP_IsCameraSettingPlayerAnimation(splitCam->setting)) {
+    // Background camera data (camDataIdx) is tied to the room and floor the player is standing
+    // on. Never copy P1's camDataIdx onto another player: doing so makes a player on a different
+    // floor adopt P1's floor-specific background camera, which pulls their view up or down.
+    // Each split camera computes its own data for its own player in Camera_Update. Changing the
+    // generic setting below also clears any stale inherited camDataIdx.
+    if (mainCam->player != NULL) {
+        bool separated = (player->actor.room != mainCam->player->actor.room) ||
+                         (fabsf(player->actor.world.pos.y - mainCam->player->actor.world.pos.y) > 50.0f);
+
+        if ((splitCam->thisIdx >= 0) && (splitCam->thisIdx < NUM_CAMS)) {
+            if (separated && !sLocalMPSplitCamSeparated[splitCam->thisIdx]) {
+                // Crossing to another room/floor: drop the old floor's background camera data
+                // once, then let Camera_Update choose data for this player's current floor.
+                splitCam->camDataIdx = -1;
+                splitCam->prevCamDataIdx = -1;
+                splitCam->nextCamDataIdx = -1;
+            }
+            sLocalMPSplitCamSeparated[splitCam->thisIdx] = separated;
+        }
+
+        // Keep a newly created split camera functional (it starts in CAM_SET_FREE0), but while
+        // the players are separated let each keep its own locomotion camera mode instead of
+        // inheriting P1's floor/room-specific mode.
+        if (separated && (splitCam->setting != CAM_SET_FREE0)) {
+            return;
+        }
+    }
+
+    if ((splitCam->setting != mainCam->setting) &&
+        !LocalMP_IsCameraSettingPlayerAnimation(mainCam->setting) &&
+        !LocalMP_IsCameraSettingPlayerAnimation(splitCam->setting)) {
         // Don't propagate player-item-animation camera modes; each player's camera should stay
         // in its own movement mode while another player is using an item.
         Camera_ChangeSetting(splitCam, mainCam->setting);
@@ -888,14 +947,33 @@ static void LocalMP_EnsureSplitScreenCameras(PlayState* play) {
     }
 }
 
-static void LocalMP_SetViewForCamera(PlayState* play, Camera* camera, Viewport* viewport) {
+// Widens the camera's field of view for 3- and 4-player split-screen. With more players each
+// viewport becomes smaller, so the same world-space height covers fewer pixels and players see
+// less around them. The boost is scaled per extra player so 4-player gets a larger increase than
+// 3-player.
+static f32 LocalMP_GetSplitScreenFovScale(s32 playerCount) {
+    s32 boostPercent;
+
+    if (playerCount < 3) {
+        return 1.0f;
+    }
+
+    boostPercent = CVarGetInteger(LOCAL_MP_SPLITSCREEN_FOV_BOOST_CVAR, 15);
+    if (boostPercent < 0) {
+        boostPercent = 0;
+    }
+
+    return 1.0f + ((boostPercent * (playerCount - 2)) / 100.0f);
+}
+
+static void LocalMP_SetViewForCamera(PlayState* play, Camera* camera, Viewport* viewport, s32 playerCount) {
     if ((play->sceneNum == SCENE_HYRULE_FIELD) && (camera->fov < 59.0f)) {
         View_SetScale(&play->view, 0.79f);
     } else {
         View_SetScale(&play->view, 1.0f);
     }
 
-    play->view.fovy = camera->fov;
+    play->view.fovy = camera->fov * LocalMP_GetSplitScreenFovScale(playerCount);
     func_800AA358(&play->view, &camera->eye, &camera->at, &camera->up);
     View_SetViewport(&play->view, viewport);
     func_800AA460(&play->view, play->view.fovy, play->view.zNear, play->lightCtx.fogFar);
@@ -1068,6 +1146,24 @@ static void LocalMP_ProcessActorAudio(PlayState* play, Player* players[4], Camer
     }
 }
 
+// Split-screen draws every player's viewport in turn. Clear the culling state once so each
+// viewport can OR its own visibility into it; otherwise the last viewport alone decides which
+// actors update next frame, freezing everything near the other players (and disabling their
+// collision).
+static void LocalMP_ResetActorCullingForSplitScreen(PlayState* play) {
+    s32 i;
+
+    for (i = 0; i < ACTORCAT_MAX; i++) {
+        Actor* actor = play->actorCtx.actorLists[i].head;
+
+        while (actor != NULL) {
+            actor->flags &= ~ACTOR_FLAG_INSIDE_CULLING_VOLUME;
+            actor->isDrawn = false;
+            actor = actor->next;
+        }
+    }
+}
+
 static void LocalMP_DrawPlayerActorsOnly(PlayState* play) {
     Actor* actor = play->actorCtx.actorLists[ACTORCAT_PLAYER].head;
 
@@ -1232,6 +1328,7 @@ static bool LocalMP_DrawSplitScreen(PlayState* play) {
     }
 
     Actor_SetSfxUpdatesSuppressed(true);
+    LocalMP_ResetActorCullingForSplitScreen(play);
 
     for (i = 0; i < playerCount; i++) {
         Viewport viewport;
@@ -1252,7 +1349,7 @@ static bool LocalMP_DrawSplitScreen(PlayState* play) {
         play->roomCtx.curRoom = viewportCurRoom;
         play->roomCtx.prevRoom = viewportPrevRoom;
 
-        LocalMP_SetViewForCamera(play, camera, &viewport);
+        LocalMP_SetViewForCamera(play, camera, &viewport, playerCount);
 
         if ((R_PAUSE_MENU_MODE <= 1) && CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0)) {
             gSPSetExtraGeometryMode(POLY_OPA_DISP++, G_EX_INVERT_CULLING);
@@ -1331,7 +1428,7 @@ static bool LocalMP_DrawSplitScreen(PlayState* play) {
             if (drawPlayersOnly) {
                 LocalMP_DrawPlayerActorsOnly(play);
             } else {
-                func_800315AC(play, &play->actorCtx);
+                func_800315AC(play, &play->actorCtx, true);
             }
         }
 
@@ -3106,7 +3203,8 @@ void Play_Draw(PlayState* play) {
                         for (retainedRoomIndex = 0; retainedRoomIndex < retainedRoomCount; retainedRoomIndex++) {
                             Room* retainedRoom = OTRRoom_GetRetainedRoom(retainedRoomIndex);
 
-                            if ((retainedRoom != NULL) && (retainedRoom->num >= 0)) {
+                            if ((retainedRoom != NULL) && (retainedRoom->num >= 0) &&
+                                OTRRoom_ShouldKeepRoomObjectsLoaded(play, retainedRoom->num)) {
                                 Room_Draw(play, retainedRoom, roomDrawFlags & 3);
                             }
                         }
@@ -3140,7 +3238,7 @@ void Play_Draw(PlayState* play) {
         }
 
         if ((HREG(80) != 10) || (HREG(85) != 0)) {
-            func_800315AC(play, &play->actorCtx);
+            func_800315AC(play, &play->actorCtx, false);
         }
 
         if ((HREG(80) != 10) || (HREG(86) != 0)) {

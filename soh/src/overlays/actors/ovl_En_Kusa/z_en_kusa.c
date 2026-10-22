@@ -367,14 +367,19 @@ void EnKusa_Main(EnKusa* this, PlayState* play) {
         Player* fallbackPlayer = GET_PLAYER(play);
         Player* nearestPlayer = NULL;
         f32 minDistSq = 1.0e20f;
+        f32 bestScore = 1.0e20f;
         s16 yawTowardsNearestPlayer = 0;
         s32 sanity = 0;
 
+        // Weight vertical separation so a player on a different floor cannot win the
+        // interaction over one standing next to the bush.
         if ((fallbackPlayer != NULL) && (fallbackPlayer->actor.update != NULL)) {
             f32 dx = this->actor.world.pos.x - fallbackPlayer->actor.world.pos.x;
+            f32 dy = this->actor.world.pos.y - fallbackPlayer->actor.world.pos.y;
             f32 dz = this->actor.world.pos.z - fallbackPlayer->actor.world.pos.z;
 
             minDistSq = (dx * dx) + (dz * dz);
+            bestScore = minDistSq + (SQ(dy) * 4.0f);
             nearestPlayer = fallbackPlayer;
             yawTowardsNearestPlayer = Math_Vec3f_Yaw(&this->actor.world.pos, &fallbackPlayer->actor.world.pos);
         }
@@ -382,10 +387,13 @@ void EnKusa_Main(EnKusa* this, PlayState* play) {
         while ((plActor != NULL) && (sanity < 2000)) {
             if ((plActor->id == ACTOR_PLAYER) && (plActor->update != NULL)) {
                 f32 dx = this->actor.world.pos.x - plActor->world.pos.x;
+                f32 dy = this->actor.world.pos.y - plActor->world.pos.y;
                 f32 dz = this->actor.world.pos.z - plActor->world.pos.z;
                 f32 distSq = (dx * dx) + (dz * dz);
+                f32 score = distSq + (SQ(dy) * 4.0f);
 
-                if (distSq < minDistSq) {
+                if (score < bestScore) {
+                    bestScore = score;
                     minDistSq = distSq;
                     nearestPlayer = (Player*)plActor;
                     yawTowardsNearestPlayer = Math_Vec3f_Yaw(&this->actor.world.pos, &plActor->world.pos);
